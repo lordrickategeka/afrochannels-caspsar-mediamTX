@@ -18,6 +18,8 @@
 #
 #   MEDIAMTX_PUBLISH_PASSWORD=<the RTMP publish password>
 #   MULTICAST_SOURCE=<full ffmpeg input URL for the fixed feed>
+#   MULTICAST_PROGRAM=<program number within that transport stream>
+#   MULTICAST_PATH=<MediaMTX path name, e.g. sanyuka>
 #   STREAM_DOMAIN=<public hostname, e.g. stream.example.com>
 #
 # DEPLOY STEP: mediamtx.yml ships with a CHANGE_ME placeholder for the publish
@@ -78,20 +80,34 @@ services:
     container_name: dewatch-ffmpeg-ingest
     restart: unless-stopped
     network_mode: host
-    # -bsf:v h264_mp4toannexb is retained to match the command this feed has
-    # been running with, but it is a no-op on this path: the UDP source is
-    # already Annex B and the FLV muxer converts regardless. Verified to give
-    # byte-identical output with and without it. Safe to drop.
+    # Two things here are not optional for this feed, both verified against it:
+    #
+    # 1. "-map 0:p:N" - each multicast group is a multi-program transport
+    #    stream carrying several TV services. Without an explicit program,
+    #    ffmpeg picks the lowest-numbered streams, which belong to whichever
+    #    service happens to sort first and may not be the one you want.
+    #
+    # 2. The video is RE-ENCODED rather than copied. This encoder emits no IDR
+    #    frames at all - measured over a 35 s window: 878 frames, SPS every
+    #    ~2.3 s, PPS every frame, zero IDR - because it uses gradual/intra
+    #    refresh. "-c:v copy" therefore never emits video (it waits forever for
+    #    a keyframe), and even if it did, HLS segments must start on a keyframe,
+    #    so MediaMTX could not cut segments. libx264 with a fixed GOP inserts
+    #    real IDRs. Measured cost: ~13% of one core for 720x576 at 25 fps.
+    #
+    # -g 50 is 2 s at 25 fps, matching hlsSegmentDuration in mediamtx.yml so
+    # segments land on keyframe boundaries.
     command: >
+      -fflags +genpts
       -analyzeduration 10000000
       -probesize 10000000
-      -fflags +genpts+discardcorrupt
       -i "${MULTICAST_SOURCE}"
-      -c:v copy
-      -bsf:v h264_mp4toannexb
-      -c:a aac
+      -map 0:p:${MULTICAST_PROGRAM}
+      -c:v libx264 -preset veryfast -tune zerolatency
+      -g 50 -keyint_min 50 -sc_threshold 0 -pix_fmt yuv420p
+      -c:a aac -b:a 128k -ar 48000
       -f flv
-      "rtmp://127.0.0.1:1935/live/multicast_stream?user=syscg-publisher&pass=${MEDIAMTX_PUBLISH_PASSWORD}"
+      "rtmp://127.0.0.1:1935/live/${MULTICAST_PATH}?user=syscg-publisher&pass=${MEDIAMTX_PUBLISH_PASSWORD}"
 
 volumes:
   caddy_data:

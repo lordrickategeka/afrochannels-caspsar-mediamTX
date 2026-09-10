@@ -55,7 +55,10 @@ fi
 SERVICES=(mediamtx)
 if [ -n "${STREAM_DOMAIN:-}" ]; then SERVICES+=(caddy)
 else echo "  STREAM_DOMAIN empty - skipping caddy (LAN access on :8888 only)"; fi
-if [ -n "${MULTICAST_SOURCE:-}" ]; then SERVICES+=(ffmpeg-ingest)
+if [ -n "${MULTICAST_SOURCE:-}" ]; then
+  : "${MULTICAST_PROGRAM:?set it in .env - one multicast group carries several TV services}"
+  : "${MULTICAST_PATH:?set it in .env - the MediaMTX path name to publish to}"
+  SERVICES+=(ffmpeg-ingest)
 else echo "  MULTICAST_SOURCE empty - skipping ffmpeg-ingest (no static feed)"; fi
 
 say "Starting: ${SERVICES[*]}"
