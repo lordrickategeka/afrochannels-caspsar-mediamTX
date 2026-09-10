@@ -78,6 +78,11 @@ services:
   ffmpeg-ingest:
     image: linuxserver/ffmpeg:latest
     container_name: dewatch-ffmpeg-ingest
+    # restart: unless-stopped only helps if ffmpeg actually EXITS when its
+    # input dries up. It does not do that by default on UDP - it blocks
+    # forever - so MULTICAST_SOURCE must carry a "timeout" parameter. See the
+    # note in .env.vm.example; without it a group that goes quiet leaves this
+    # container alive but frozen, and the stream never comes back on its own.
     restart: unless-stopped
     network_mode: host
     # Two things here are not optional for this feed, both verified against it:
