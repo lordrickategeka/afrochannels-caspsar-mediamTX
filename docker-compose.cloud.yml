@@ -1,0 +1,98 @@
+###############################################################################
+# Ingest VM — docker compose
+#
+# Runs INSIDE the Ubuntu VM on the ingest PC (the one dual-homed onto the
+# multicast LAN via ether1 and the internet via ether2). Not for the local
+# Windows machine.
+#
+# Deploy this alongside mediamtx.cloud.yml (renamed to mediamtx.yml, which is
+# the name the volume mount expects) and the Caddyfile:
+#
+#   ~/dewatch/
+#     docker-compose.yml   <- this file
+#     mediamtx.yml         <- from mediamtx.cloud.yml
+#     Caddyfile
+#     .env                 <- secrets + machine-specific values, NEVER committed
+#
+# The .env beside this file must define:
+#
+#   MEDIAMTX_PUBLISH_PASSWORD=<the RTMP publish password>
+#   MULTICAST_SOURCE=<full ffmpeg input URL for the fixed feed>
+#   STREAM_DOMAIN=<public hostname, e.g. stream.example.com>
+#
+# DEPLOY STEP: mediamtx.yml ships with a CHANGE_ME placeholder for the publish
+# password so it is safe to commit. After copying it to the VM, substitute the
+# real value in - the container reads the file, not the environment:
+#
+#   cd ~/dewatch && set -a && . ./.env && set +a
+#   sed -i "s|CHANGE_ME_MATCH_MEDIAMTX_PUBLISH_PASSWORD|${MEDIAMTX_PUBLISH_PASSWORD}|" mediamtx.yml
+#
+# Note the RTMP URL below puts credentials in the query string. MediaMTX does
+# not accept the user:pass@host form - it authenticates as anonymous and fails.
+# Keep the password URL-safe (alphanumeric); nothing URL-encodes it here.
+#
+# MULTICAST_SOURCE is machine- and feed-specific, which is why it lives in .env
+# rather than here. Its "localaddr" must match an address that actually exists
+# on this VM, or ffmpeg cannot join the group - check with "ip -4 -brief addr".
+# Leave it empty and deploy.sh simply will not start this service.
+###############################################################################
+
+services:
+  # All services use network_mode: host. That is what lets publishers reach
+  # MediaMTX over real loopback, which is what makes the loopback-only
+  # ips: ["127.0.0.1", "::1"] publish rule in mediamtx.yml safe - and what
+  # lets the VM receive multicast on its bridged interface at all.
+  mediamtx:
+    # Consider pinning to a release (e.g. :1.20.1) rather than :latest, so a
+    # restart cannot silently pull a version with different config semantics.
+    image: bluenviron/mediamtx:latest
+    container_name: dewatch-mediamtx-cloud
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./mediamtx.yml:/mediamtx.yml:ro
+
+  # Public HTTPS edge. Terminates TLS on :443 and proxies to MediaMTX's HLS
+  # listener on loopback:8888, so :8888 itself never needs to be exposed.
+  caddy:
+    image: caddy:2
+    container_name: dewatch-caddy
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      # Consumed by the Caddyfile as {$STREAM_DOMAIN}.
+      STREAM_DOMAIN: ${STREAM_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # caddy_data holds the issued certificates and ACME account key. It must
+      # persist: losing it forces re-issuance, and Let's Encrypt rate-limits
+      # that to 5 duplicate certificates per week.
+      - caddy_data:/data
+      - caddy_config:/config
+      - ./logs/caddy:/var/log/caddy
+
+  # Static multicast ingest. This is the fixed feed; the dashboard creates its
+  # own additional "ingest-<slug>" containers at runtime via vm-control.js.
+  ffmpeg-ingest:
+    image: linuxserver/ffmpeg:latest
+    container_name: dewatch-ffmpeg-ingest
+    restart: unless-stopped
+    network_mode: host
+    # -bsf:v h264_mp4toannexb is retained to match the command this feed has
+    # been running with, but it is a no-op on this path: the UDP source is
+    # already Annex B and the FLV muxer converts regardless. Verified to give
+    # byte-identical output with and without it. Safe to drop.
+    command: >
+      -analyzeduration 10000000
+      -probesize 10000000
+      -fflags +genpts+discardcorrupt
+      -i "${MULTICAST_SOURCE}"
+      -c:v copy
+      -bsf:v h264_mp4toannexb
+      -c:a aac
+      -f flv
+      "rtmp://127.0.0.1:1935/live/multicast_stream?user=syscg-publisher&pass=${MEDIAMTX_PUBLISH_PASSWORD}"
+
+volumes:
+  caddy_data:
+  caddy_config:

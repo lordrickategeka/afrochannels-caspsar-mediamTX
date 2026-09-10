@@ -37,6 +37,28 @@ function assertSafeSourceUrl(sourceUrl) {
   }
 }
 
+// ffmpeg input-side options, which have to precede "-i".
+//
+// analyzeduration/probesize are ceilings rather than fixed delays - ffmpeg
+// stops probing the moment it has identified the streams - so raising them
+// only costs time on sources that are genuinely slow to describe themselves,
+// notably MPEG-TS over multicast where the PAT/PMT tables may not arrive in
+// the first few hundred KB. Left at the default, those sources either take a
+// long time to start or fail outright with "could not find codec parameters".
+//
+// "+genpts+discardcorrupt" is limited to udp:// on purpose: plain multicast
+// has no retransmission, so loss arrives as corrupt packets and holes in the
+// timestamps, and dropping those beats feeding them to the muxer. The other
+// schemes are either TCP-based or (SRT) recover loss themselves, so they keep
+// ffmpeg's default handling rather than silently discarding data.
+function inputFlags(sourceUrl) {
+  const flags = ['-analyzeduration 10000000', '-probesize 10000000'];
+  if (sourceUrl.startsWith('udp://')) {
+    flags.push('-fflags +genpts+discardcorrupt');
+  }
+  return flags.join(' ');
+}
+
 function assertSafeSlug(slug) {
   if (typeof slug !== 'string' || !SAFE_SLUG_RE.test(slug)) {
     throw new Error(`Invalid stream slug "${slug}"`);
@@ -95,7 +117,17 @@ async function startIngest(slug, sourceUrl) {
   assertSafeSlug(slug);
   assertSafeSourceUrl(sourceUrl);
   const name = containerName(slug);
-  const rtmpUrl = `rtmp://${MEDIAMTX_PUBLISH_USER}:${MEDIAMTX_PUBLISH_PASSWORD}@127.0.0.1:1935/live/${slug}`;
+  // Credentials go in the query string, NOT as user:pass@host. MediaMTX reads
+  // RTMP credentials only from the "user"/"pass" query parameters; the userinfo
+  // form is ignored, the connection is treated as anonymous, and a server with
+  // authInternalUsers configured rejects it. Verified against MediaMTX v1.21.0:
+  // userinfo -> "failed to authenticate", query params -> "is publishing to".
+  // encodeURIComponent matters twice over - it keeps a password containing URL
+  // metacharacters intact, and it strips quotes that would otherwise break out
+  // of the single-quoted shell argument this ends up inside.
+  const rtmpUrl = `rtmp://127.0.0.1:1935/live/${slug}`
+    + `?user=${encodeURIComponent(MEDIAMTX_PUBLISH_USER)}`
+    + `&pass=${encodeURIComponent(MEDIAMTX_PUBLISH_PASSWORD)}`;
 
   return withConnection(async (ssh) => {
     // "docker run --name" fails outright if a container by that name already
@@ -107,6 +139,7 @@ async function startIngest(slug, sourceUrl) {
       `--name ${name}`,
       '--restart unless-stopped',
       'linuxserver/ffmpeg',
+      inputFlags(sourceUrl),
       `-i '${sourceUrl}'`,
       '-c:v copy -c:a aac -f flv',
       `'${rtmpUrl}'`

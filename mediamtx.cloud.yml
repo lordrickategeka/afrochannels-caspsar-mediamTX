@@ -1,0 +1,100 @@
+###############################################################################
+# MediaMTX configuration — CLOUD INGEST VM
+#
+# This is NOT the config for the local Windows MediaMTX in
+# mediamtx_v1.20.1_windows_amd64/ (that one is the stock default). This file
+# is the trimmed config for the Linux VM that amcp-dashboard drives over SSH
+# via vm-control.js.
+#
+# Pipeline it serves:
+#   dashboard --ssh--> VM: docker run --network host linuxserver/ffmpeg
+#                          -i <source> -c:v copy -c:a aac -f flv
+#                          rtmp://<user>:<pass>@127.0.0.1:1935/live/<slug>
+#   viewers   <------- http://<vm-host>:8888/live/<slug>/index.m3u8
+#
+# A second, static ingest also publishes here: the compose-managed
+# "ffmpeg-ingest" service pulls a fixed UDP multicast feed and publishes it to
+# live/multicast_stream. Both ingest paths use the same publish credentials.
+#
+# Anything not set here keeps its MediaMTX default.
+###############################################################################
+
+logLevel: info
+
+###############################################################################
+# Authentication
+#
+# The publish user must match MEDIAMTX_PUBLISH_USER / MEDIAMTX_PUBLISH_PASSWORD
+# in amcp-dashboard/.env — vm-control.js embeds them in the RTMP URL.
+# Reading is anonymous so HLS players need no credentials.
+###############################################################################
+authMethod: internal
+authInternalUsers:
+  # Publisher — the ffmpeg container. Password only; do not commit the real one.
+  - user: syscg-publisher
+    pass: CHANGE_ME_MATCH_MEDIAMTX_PUBLISH_PASSWORD
+    # Loopback-only. Safe because compose runs BOTH the mediamtx and
+    # ffmpeg-ingest services with network_mode: host, so publishers reach
+    # MediaMTX over real loopback. If either service ever moves off host
+    # networking (e.g. published ports, -p 1935:1935), the connection would
+    # instead arrive from the docker bridge gateway (172.17.0.1) and this
+    # rule would lock out ingest — widen it to [] if that happens.
+    ips: ["127.0.0.1", "::1"]
+    permissions:
+      - action: publish
+
+  # Viewers — anonymous read-only.
+  - user: any
+    pass:
+    ips: []
+    permissions:
+      - action: read
+      - action: playback
+
+###############################################################################
+# Listeners — RTMP in, HLS out. Everything else is off so the VM exposes no
+# ports it does not use. RTSP/SRT source URLs still work: ffmpeg pulls those
+# itself, which needs no listener here.
+###############################################################################
+api: false
+rtsp: false
+srt: false
+webrtc: false
+moq: false
+
+# Ingest.
+rtmp: true
+rtmpAddress: :1935
+
+# Delivery.
+hls: true
+hlsAddress: :8888
+hlsAllowOrigins: ["*"]
+hlsVariant: lowLatency
+# Must be >= 7 whenever hlsVariant is lowLatency - MediaMTX refuses to start
+# otherwise ("'hlsSegmentCount' must be at least 7 when 'hlsVariant' is
+# 'lowLatency'"). The value of 5 this was originally set to is only valid for
+# the mpegts variant.
+hlsSegmentCount: 7
+hlsSegmentDuration: 2s
+# Keep the HLS muxer running even with nobody watching. Without this MediaMTX
+# builds the playlist on the first request and tears it down again after
+# hlsMuxerCloseAfter, so a link handed to an outsider makes them wait several
+# seconds for the first segments - and a link tested cold looks broken. For a
+# 24/7 channel the constant cost is negligible.
+hlsAlwaysRemux: true
+
+###############################################################################
+# Paths
+#
+# Note: ingest uses "-c:v copy", so MediaMTX can only start a new segment on a
+# keyframe from the source. hlsSegmentDuration is therefore a floor, not a
+# guarantee — a source with a long GOP yields longer segments. Shorten the GOP
+# at the source (or re-encode) if latency matters more than CPU.
+###############################################################################
+pathDefaults:
+  source: publisher
+  sourceOnDemand: false
+
+paths:
+  all_others:

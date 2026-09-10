@@ -14,6 +14,9 @@ yarn-error.log*
 .env
 .env.*
 !.env.example
+# Per-machine env templates (e.g. .env.vm.example) carry no secrets and are
+# meant to be shared; only the filled-in .env files are ignored.
+!.env.*.example
 *.pem
 *.key
 *.crt

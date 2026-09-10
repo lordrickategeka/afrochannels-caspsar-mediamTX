@@ -1,0 +1,27 @@
+###############################################################################
+# Public HTTPS edge for the HLS output.
+#
+# Deploy next to docker-compose.yml on the VM. Caddy obtains and renews a
+# Let's Encrypt certificate on its own - the only prerequisites are that
+# STREAM_DOMAIN resolves to your ether2 public IP and that the router forwards
+# BOTH :80 and :443 to the VM (:80 is what the ACME challenge uses; without it
+# no certificate is ever issued).
+#
+# Never forward :1935 or :8888. Only Caddy is exposed; MediaMTX stays on
+# loopback behind it.
+###############################################################################
+
+{$STREAM_DOMAIN} {
+	encode gzip
+
+	# MediaMTX already sends Access-Control-Allow-Origin: * for HLS, which is
+	# what lets third-party pages embed these links.
+	reverse_proxy 127.0.0.1:8888
+
+	log {
+		output file /var/log/caddy/access.log {
+			roll_size 10mb
+			roll_keep 5
+		}
+	}
+}
