@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Censor Box</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      width: 1920px;
+      height: 1080px;
+      overflow: hidden;
+      background: transparent;
+    }
+
+    /* Default position/size/color; overridden inline by update(). A solid
+       opaque block rather than a true blur - CasparCG's ffmpeg consumer
+       doesn't support the branching filter graph (crop+blur+overlay) a real
+       blur needs, and a CG overlay layer has no access to the video pixels
+       beneath it anyway (backdrop-filter can't see through to a separately
+       composited layer). Fully occluding the region is the achievable
+       (and arguably more reliable) alternative. */
+    .censor-box {
+      position: absolute;
+      top: 60px;
+      left: 60px;
+      width: 20%;
+      height: 20%;
+      background: #000000;
+      opacity: 0;
+      transition: opacity 0.2s ease;
+    }
+
+    .censor-box.active {
+      opacity: 1;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="censor-box" id="overlay"></div>
+
+  <script>
+    const overlay = document.getElementById('overlay');
+
+    // 1. Called by CasparCG to update data dynamically
+    function update(str) {
+      let data = str;
+      if (typeof str === 'string') {
+        try {
+          data = JSON.parse(str);
+        } catch (e) {
+          data = {};
+        }
+      }
+
+      if (data.color) overlay.style.background = data.color;
+
+      // position: { xPercent, yPercent } of the 1920x1080 canvas (top-left
+      // corner of the box), set from the dashboard's click-to-place picker.
+      if (data.position) {
+        overlay.style.left = (data.position.xPercent / 100) * 1920 + 'px';
+        overlay.style.top = (data.position.yPercent / 100) * 1080 + 'px';
+      }
+
+      if (data.widthPercent) overlay.style.width = data.widthPercent + '%';
+      if (data.heightPercent) overlay.style.height = data.heightPercent + '%';
+    }
+
+    // 2. Called by CasparCG when layer is triggered to PLAY
+    function play() {
+      overlay.classList.add('active');
+    }
+
+    // 3. Called by CasparCG when layer is triggered to STOP
+    function stop() {
+      overlay.classList.remove('active');
+    }
+  </script>
+</body>
+</html>

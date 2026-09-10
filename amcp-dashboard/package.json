@@ -1,0 +1,30 @@
+{
+  "name": "amcp-dashboard",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "pm2:start": "npx pm2 start ecosystem.config.js",
+    "pm2:stop": "npx pm2 stop amcp-dashboard",
+    "pm2:restart": "npx pm2 restart amcp-dashboard",
+    "pm2:logs": "npx pm2 logs amcp-dashboard",
+    "pm2:status": "npx pm2 status"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "bcrypt": "^6.0.0",
+    "casparcg-connection": "^7.0.0",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "express-session": "^1.19.0",
+    "multer": "^2.2.0",
+    "node-ssh": "^13.2.1",
+    "pm2": "^7.0.4",
+    "sequelize": "^6.37.8",
+    "sqlite3": "^6.0.1"
+  }
+}

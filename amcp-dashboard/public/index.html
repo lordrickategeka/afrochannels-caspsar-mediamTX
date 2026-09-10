@@ -1,0 +1,1190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Afro Mobile | Stream Playout & Live Preview</title>
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
+</head>
+<body class="bg-slate-900 text-slate-100 min-h-screen p-4 md:p-8 flex justify-center">
+
+  <!-- Global loading bar: shows whenever any request is in flight, in addition
+       to per-button spinners on whichever specific control triggered it. -->
+  <div id="global-loading-bar" class="fixed top-0 left-0 h-1 bg-sky-400 z-50" style="width:0%; opacity:0; transition: width 0.3s ease, opacity 0.3s ease;"></div>
+
+  <div class="w-full max-w-6xl flex flex-col gap-6">
+
+    <!-- Header -->
+    <header class="border-b border-slate-800 pb-4 flex items-center justify-between">
+      <div>
+        <h1 class="text-2xl font-bold text-sky-400">Stream Branding & Live Production Console</h1>
+        <p class="text-slate-400 text-sm mt-1" id="active-channel-label">Loading...</p>
+      </div>
+      <button onclick="logout(this)" class="text-slate-400 hover:text-slate-200 text-sm border border-slate-700 rounded-lg px-3 py-1.5 transition">Log Out</button>
+    </header>
+
+    <!-- Main Layout: tabbed controls on the left, video monitor + status
+         pinned on the right so the preview is always visible no matter which
+         tab is open (the page had grown too tall with everything stacked in
+         one scroll). -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
+
+      <!-- Left Column: Tabbed Controls -->
+      <div class="flex flex-col gap-4 min-w-0">
+
+        <!-- Tab Bar -->
+        <div class="flex gap-2 overflow-x-auto">
+          <button id="tab-btn-channels" onclick="setMainTab('channels')" class="px-4 py-2 rounded-lg text-sm font-medium transition whitespace-nowrap">Channels</button>
+          <button id="tab-btn-graphics" onclick="setMainTab('graphics')" class="px-4 py-2 rounded-lg text-sm font-medium transition whitespace-nowrap">Graphics</button>
+          <button id="tab-btn-cloud" onclick="setMainTab('cloud')" class="px-4 py-2 rounded-lg text-sm font-medium transition whitespace-nowrap">Cloud Streams</button>
+          <button id="tab-btn-system" onclick="setMainTab('system')" class="px-4 py-2 rounded-lg text-sm font-medium transition whitespace-nowrap">System &amp; Logs</button>
+        </div>
+
+        <!-- Tab: Channels -->
+        <div id="tab-panel-channels" class="flex flex-col gap-6">
+
+          <!-- Channel Switcher -->
+          <div class="bg-slate-800/80 border border-slate-700/60 rounded-xl p-6 shadow-lg">
+            <div class="flex items-center justify-between border-b border-slate-700/60 pb-2 mb-4">
+              <h2 class="text-base font-semibold text-slate-200">Channels</h2>
+              <button onclick="toggleNewChannelForm()" class="text-sky-400 hover:text-sky-300 text-xs font-medium">+ New Channel</button>
+            </div>
+            <div id="channel-list" class="flex flex-col gap-2 mb-3"></div>
+
+            <div id="new-channel-form" class="hidden border-t border-slate-700/50 pt-4 mt-2 space-y-2">
+              <input type="text" id="nc-name" placeholder="Channel name" class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-slate-100 text-sm focus:outline-none focus:border-sky-500 transition">
+              <p class="text-xs text-slate-500">Add one or more input sources below - any format (SRT, RTMP, RTSP, HTTP...). The RTMP output and HLS link are generated automatically from the channel name.</p>
+              <details class="text-xs">
+                <summary class="text-slate-500 cursor-pointer select-none">Advanced: override the RTMP output target</summary>
+                <input type="text" id="nc-rtmp" placeholder="Leave blank to auto-generate" class="w-full mt-2 bg-slate-900 border border-slate-700 rounded-lg p-2 text-slate-100 text-sm focus:outline-none focus:border-sky-500 transition">
+              </details>
+              <div id="nc-sources" class="space-y-2"></div>
+              <button onclick="addNewChannelSourceRow()" class="text-sky-400 hover:text-sky-300 text-xs font-medium">+ Add Source</button>
+              <div class="flex gap-2 pt-2">
+                <button onclick="createChannel(this)" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-medium flex-1 transition">Create</button>
+                <button onclick="toggleNewChannelForm()" class="bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-lg text-sm font-medium flex-1 transition">Cancel</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- SRT Feed Control -->
+          <div class="bg-slate-800/80 border border-slate-700/60 rounded-xl p-6 shadow-lg">
+            <div class="flex items-center justify-between border-b border-slate-700/60 pb-2 mb-4">
+              <h2 class="text-base font-semibold text-slate-200">Live Input Feed</h2>
+              <button onclick="toggleNewSourceForm()" class="text-sky-400 hover:text-sky-300 text-xs font-medium">+ Add Source</button>
+            </div>
+            <div id="source-buttons" class="flex flex-col gap-2 mb-2">
+              <span class="text-slate-500 text-sm">Loading sources...</span>
+            </div>
+            <div id="new-source-form" class="hidden flex flex-wrap gap-2 mb-3 pt-3 border-t border-slate-700/50">
+              <input type="text" id="ns-label" placeholder="Label" class="flex-1 min-w-[120px] bg-slate-900 border border-slate-700 rounded-lg p-2 text-slate-100 text-sm focus:outline-none focus:border-sky-500 transition">
+              <input type="text" id="ns-url" placeholder="Source URL (any format: srt://, rtmp://, rtsp://, http(s)://...)" class="flex-[2] min-w-[220px] bg-slate-900 border border-slate-700 rounded-lg p-2 text-slate-100 text-sm focus:outline-none focus:border-sky-500 transition">
+              <button onclick="addSourceToActiveChannel()" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition">Add</button>
+            </div>
+            <button onclick="clearChannel()" class="bg-red-600 hover:bg-red-700 text-white px-4 py-2.5 rounded-lg font-medium text-sm transition w-full">Clear Channel</button>
+          </div>
+
+        </div>
+
+        <!-- Tab: Graphics -->
+        <div id="tab-panel-graphics" class="hidden">
+        <!-- Graphics Control -->
+        <div class="bg-slate-800/80 border border-slate-700/60 rounded-xl p-6 shadow-lg">
+          <h2 class="text-base font-semibold text-slate-200 border-b border-slate-700/60 pb-2 mb-4">CG Graphics Control</h2>
+
+          <!-- Lower Third -->
+          <div class="border border-slate-700/50 rounded-lg p-4 mb-4">
+            <div class="flex items-center justify-between mb-3">
+              <h3 class="text-sm font-medium text-slate-300">Lower Third</h3>
+              <span id="graphic-dot-lower_third" class="w-2 h-2 rounded-full bg-slate-600"></span>
+            </div>
+            <div class="space-y-2 mb-3">
+              <input type="text" id="lower_third-title" value="CINEMACHI ACTION" placeholder="Title" class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-slate-100 text-sm focus:outline-none focus:border-sky-500 transition">
+              <input type="text" id="lower_third-subtitle" value="AFRO MOBILE MEDIA | CH 06" placeholder="Subtitle" class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-slate-100 text-sm focus:outline-none focus:border-sky-500 transition">
+            </div>
+            <div class="mb-3">
+              <label class="text-xs text-slate-500 mb-1 block">Position (click to place)</label>
+              <div id="position-lower_third" class="w-full max-w-[220px]"></div>
+            </div>
+            <div class="flex gap-2 mb-3">
+              <button onclick="showLowerThird(this)" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-medium flex-1 transition">Show</button>
+              <button onclick="hideGraphic('lower_third', this)" class="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg text-sm font-medium flex-1 transition">Hide</button>
+              <button onclick="saveLowerThirdPreset(this)" class="bg-slate-700 hover:bg-slate-600 text-white px-3 py-2 rounded-lg text-sm font-medium transition" title="Save current text and position as a new preset">Save</button>
+            </div>
+            <div id="presets-lower_third" class="flex flex-wrap gap-1.5"></div>
+          </div>
+
+          <!-- Logo Bug -->
+          <div class="border border-slate-700/50 rounded-lg p-4 mb-4">
+            <div class="flex items-center justify-between mb-3">
+              <h3 class="text-sm font-medium text-slate-300">Logo Bug</h3>
+              <span id="graphic-dot-logo_bug" class="w-2 h-2 rounded-full bg-slate-600"></span>
+            </div>
+            <div class="mb-3">
+              <input type="text" id="logo_bug-text" value="CH 06" placeholder="Bug text" class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-slate-100 text-sm focus:outline-none focus:border-sky-500 transition">
+            </div>
+            <div class="mb-3">
+              <label class="text-xs text-slate-500 mb-1 block">Position (click to place)</label>
+              <div id="position-logo_bug" class="w-full max-w-[220px]"></div>
+            </div>
+            <div class="flex gap-2 mb-3">
+              <button onclick="showLogoBug(this)" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-medium flex-1 transition">Show</button>
+              <button onclick="hideGraphic('logo_bug', this)" class="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg text-sm font-medium flex-1 transition">Hide</button>
+              <button onclick="saveLogoBugPreset(this)" class="bg-slate-700 hover:bg-slate-600 text-white px-3 py-2 rounded-lg text-sm font-medium transition" title="Save current text and position as a new preset">Save</button>
+            </div>
+            <div id="presets-logo_bug" class="flex flex-wrap gap-1.5"></div>
+          </div>
+
+          <!-- Ticker -->
+          <div class="border border-slate-700/50 rounded-lg p-4">
+            <div class="flex items-center justify-between mb-3">
+              <h3 class="text-sm font-medium text-slate-300">Ticker</h3>
+              <span id="graphic-dot-ticker" class="w-2 h-2 rounded-full bg-slate-600"></span>
+            </div>
+            <div class="mb-3">
+              <input type="text" id="ticker-text" value="BREAKING NEWS..." placeholder="Ticker text" class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-slate-100 text-sm focus:outline-none focus:border-sky-500 transition">
+            </div>
+            <div class="mb-3">
+              <label class="text-xs text-slate-500 mb-1 block">Position (always full-width)</label>
+              <div class="flex gap-2">
+                <button id="ticker-pos-top" onclick="setTickerPosition('top')" class="flex-1 bg-slate-900 border border-slate-700 rounded-lg py-1.5 text-xs text-slate-300 transition">Top</button>
+                <button id="ticker-pos-bottom" onclick="setTickerPosition('bottom')" class="flex-1 bg-slate-900 border border-slate-700 rounded-lg py-1.5 text-xs text-slate-300 transition">Bottom</button>
+              </div>
+            </div>
+            <div class="flex gap-2 mb-3">
+              <button onclick="showTicker(this)" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-medium flex-1 transition">Show</button>
+              <button onclick="hideGraphic('ticker', this)" class="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg text-sm font-medium flex-1 transition">Hide</button>
+              <button onclick="saveTickerPreset(this)" class="bg-slate-700 hover:bg-slate-600 text-white px-3 py-2 rounded-lg text-sm font-medium transition" title="Save current text and position as a new preset">Save</button>
+            </div>
+            <div id="presets-ticker" class="flex flex-wrap gap-1.5"></div>
+          </div>
+
+          <!-- Image Overlays - one card per slot, generated by JS (see IMAGE_OVERLAY_SLOTS) -->
+          <div id="image-overlay-cards" class="mt-4 space-y-4"></div>
+
+          <!-- Censor Boxes - solid occlusion blocks, not a true blur (see
+               server.js TEMPLATES comment for why). One card per slot, same
+               pattern as image overlays. -->
+          <div id="censor-box-cards" class="mt-4 space-y-4"></div>
+        </div>
+        </div>
+
+        <!-- Tab: Cloud Streams -->
+        <div id="tab-panel-cloud" class="hidden">
+        <!-- Cloud Streams: any stream source -> HLS via the cloud VM's
+             MediaMTX. Independent of the local CasparCG channels above - for
+             taking a raw feed (UDP multicast/IPTV, SRT, RTMP, RTSP, or an
+             HTTP(S) stream) and handing out an HLS link any other system can
+             pull. -->
+        <div class="bg-slate-800/80 border border-slate-700/60 rounded-xl p-6 shadow-lg">
+          <div class="flex items-center justify-between border-b border-slate-700/60 pb-2 mb-2">
+            <h2 class="text-base font-semibold text-slate-200">Cloud Streams (Source &rarr; HLS)</h2>
+            <button onclick="toggleNewCloudStreamForm()" class="text-sky-400 hover:text-sky-300 text-xs font-medium">+ New Source</button>
+          </div>
+          <p class="text-xs text-slate-500 mb-3">Ingests a stream on the cloud VM and republishes it as HLS via the VM's MediaMTX. Accepts udp://, srt://, rtmp(s)://, rtsp://, or http(s)://.</p>
+          <div id="cloud-stream-list" class="flex flex-col gap-2 mb-3">
+            <span class="text-slate-500 text-sm">Loading...</span>
+          </div>
+
+          <div id="new-cloud-stream-form" class="hidden border-t border-slate-700/50 pt-4 mt-2 space-y-2">
+            <input type="text" id="cs-name" placeholder="Stream name" class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-slate-100 text-sm focus:outline-none focus:border-sky-500 transition">
+            <input type="text" id="cs-source-url" placeholder="udp://239.1.1.1:1234, srt://host:port, rtmp://host/app, rtsp://host/path, https://host/stream.m3u8 ..." class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-slate-100 text-sm font-mono focus:outline-none focus:border-sky-500 transition">
+            <div class="flex gap-2 pt-2">
+              <button onclick="createCloudStream(this)" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-medium flex-1 transition">Create</button>
+              <button onclick="toggleNewCloudStreamForm()" class="bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-lg text-sm font-medium flex-1 transition">Cancel</button>
+            </div>
+          </div>
+        </div>
+        </div>
+
+        <!-- Tab: System & Logs -->
+        <div id="tab-panel-system" class="hidden flex flex-col gap-6">
+
+          <!-- System -->
+          <div class="bg-slate-800/80 border border-slate-700/60 rounded-xl p-6 shadow-lg">
+            <h2 class="text-base font-semibold text-slate-200 border-b border-slate-700/60 pb-2 mb-4">System</h2>
+            <p class="text-xs text-slate-500 mb-3">CasparCG and MediaMTX run as child processes of this dashboard - their output appears in the Process Console below instead of separate terminal windows.</p>
+            <div class="flex items-center justify-between border border-slate-700/50 rounded-lg p-3 mb-2">
+              <div class="flex items-center gap-2">
+                <span id="dot-proc-casparcg" class="w-2.5 h-2.5 rounded-full bg-slate-600"></span>
+                <span class="text-sm text-slate-300">CasparCG</span>
+              </div>
+              <button onclick="restartProcess('casparcg', this)" class="bg-amber-600 hover:bg-amber-700 text-white px-3 py-1.5 rounded-lg text-xs font-medium transition">Restart</button>
+            </div>
+            <div class="flex items-center justify-between border border-slate-700/50 rounded-lg p-3 mb-2">
+              <div class="flex items-center gap-2">
+                <span id="dot-proc-mediamtx" class="w-2.5 h-2.5 rounded-full bg-slate-600"></span>
+                <span class="text-sm text-slate-300">MediaMTX</span>
+              </div>
+              <button onclick="restartProcess('mediamtx', this)" class="bg-amber-600 hover:bg-amber-700 text-white px-3 py-1.5 rounded-lg text-xs font-medium transition">Restart</button>
+            </div>
+            <div class="flex items-center justify-between border border-slate-700/50 rounded-lg p-3">
+              <div class="flex items-center gap-2">
+                <span id="dot-cloud-vm" class="w-2.5 h-2.5 rounded-full bg-slate-600"></span>
+                <span class="text-sm text-slate-300">Cloud VM</span>
+              </div>
+              <span id="cloud-vm-label" class="text-xs text-slate-500">Checking...</span>
+            </div>
+          </div>
+
+          <!-- Action Log -->
+          <div class="bg-slate-800/80 border border-slate-700/60 rounded-xl p-6 shadow-lg">
+            <h2 class="text-base font-semibold text-slate-200 border-b border-slate-700/60 pb-2 mb-3">Action Log</h2>
+            <div id="log" class="bg-slate-950 border border-slate-800 rounded-lg p-3 font-mono text-xs min-h-[50px] max-h-64 overflow-y-auto flex flex-col-reverse gap-1">
+              <div class="text-emerald-400">[System Ready]</div>
+            </div>
+          </div>
+
+          <!-- Process Console: live output from the dashboard, CasparCG, and
+               MediaMTX, all of which run as child processes of the dashboard
+               now - replaces needing separate terminal windows for each. -->
+          <div class="bg-slate-800/80 border border-slate-700/60 rounded-xl p-6 shadow-lg">
+            <div class="flex items-center justify-between border-b border-slate-700/60 pb-2 mb-3">
+              <h2 class="text-base font-semibold text-slate-200">Process Console</h2>
+              <div class="flex gap-1">
+                <button id="proc-tab-dashboard" onclick="setProcessTab('dashboard')" class="px-3 py-1 rounded-lg text-xs font-medium transition">Dashboard</button>
+                <button id="proc-tab-casparcg" onclick="setProcessTab('casparcg')" class="px-3 py-1 rounded-lg text-xs font-medium transition">CasparCG</button>
+                <button id="proc-tab-mediamtx" onclick="setProcessTab('mediamtx')" class="px-3 py-1 rounded-lg text-xs font-medium transition">MediaMTX</button>
+              </div>
+            </div>
+            <div id="process-log" class="bg-slate-950 border border-slate-800 rounded-lg p-3 font-mono text-xs text-slate-300 h-80 overflow-y-auto whitespace-pre-wrap"></div>
+          </div>
+
+        </div>
+
+      </div>
+
+      <!-- Right Column: Status, Monitor & Output Links - sticky so the
+           preview stays visible while scrolling a tall tab panel, and stays
+           put across tab switches instead of being one of the tabs. -->
+      <div class="flex flex-col gap-6 lg:sticky lg:top-4 self-start">
+
+        <!-- System Status Bar -->
+        <div class="bg-slate-800/80 border border-slate-700/60 rounded-xl p-4 shadow-lg flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
+          <div class="flex items-center gap-2">
+            <span id="dot-caspar" class="w-2.5 h-2.5 rounded-full bg-slate-600"></span>
+            <span class="text-slate-300">CasparCG</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <span id="dot-stream" class="w-2.5 h-2.5 rounded-full bg-slate-600"></span>
+            <span class="text-slate-300">RTMP Output</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="text-slate-400">Live Source:</span>
+            <span id="status-source" class="font-medium text-slate-200">None</span>
+          </div>
+        </div>
+
+        <!-- HLS Video Monitor -->
+        <div class="bg-slate-800/80 border border-slate-700/60 rounded-xl p-6 shadow-lg">
+          <h2 class="text-base font-semibold text-slate-200 border-b border-slate-700/60 pb-2 mb-4">Live Output Monitor (HLS, with audio)</h2>
+          <div class="relative w-full aspect-video bg-black rounded-lg overflow-hidden border-2 border-sky-500/50 shadow-inner">
+            <video id="preview" class="w-full h-full" controls autoplay muted playsinline></video>
+            <div id="preview-offline" class="absolute inset-0 flex items-center justify-center text-slate-500 text-sm bg-black/60">Waiting for stream...</div>
+          </div>
+          <p class="text-xs text-slate-500 mt-2">Starts muted (browser autoplay policy) - unmute with the player controls. The WebRTC path can't carry this feed's AAC audio track at all, which is why this uses HLS instead.</p>
+        </div>
+
+        <!-- HLS Package Link -->
+        <div class="bg-slate-800/80 border border-slate-700/60 rounded-xl p-6 shadow-lg">
+          <h2 class="text-base font-semibold text-slate-200 border-b border-slate-700/60 pb-2 mb-2">Downstream HLS Package Link</h2>
+          <p class="text-xs text-slate-400 mb-3">Use this URL in your downstream streaming system or web player:</p>
+          <div id="hls-link" class="bg-slate-900 border border-dashed border-sky-500/40 rounded-lg p-3 font-mono text-xs text-sky-400 select-all break-all">
+            Loading...
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+  </div>
+
+  <script>
+    const LOG_COLORS = { info: 'text-emerald-400', error: 'text-red-400', success: 'text-emerald-400' };
+    let activeChannel = null; // full channel record: {id, name, rtmpTarget, Sources[], BrandingPresets[]}
+    let allChannels = [];
+    let tickerPosition = 'bottom';
+    let currentProcessTab = 'dashboard';
+    const processLogBuffers = { dashboard: [], casparcg: [], mediamtx: [] };
+    const IMAGE_OVERLAY_SLOTS = 3; // must match IMAGE_OVERLAY_SLOTS in server.js
+    const CENSOR_BOX_SLOTS = 3; // must match CENSOR_BOX_SLOTS in server.js
+    const uploadedImageUrls = {}; // slotKey -> uploaded URL
+
+    // --- Position picker (click-to-place, percentage of the 1920x1080 canvas) ---
+    const positionGetters = {};
+
+    function createPositionPicker(containerId, xPercent, yPercent) {
+      const box = document.getElementById(containerId);
+      box.className = 'w-full max-w-[220px] aspect-video bg-slate-950 border border-slate-700 rounded-lg relative cursor-crosshair';
+      const marker = document.createElement('div');
+      marker.className = 'absolute w-3 h-3 -ml-1.5 -mt-1.5 rounded-full bg-emerald-400 border-2 border-slate-900';
+      box.appendChild(marker);
+
+      let pos = { xPercent, yPercent };
+      const render = () => { marker.style.left = pos.xPercent + '%'; marker.style.top = pos.yPercent + '%'; };
+      render();
+
+      box.onclick = (e) => {
+        const rect = box.getBoundingClientRect();
+        pos = {
+          xPercent: Math.max(0, Math.min(100, ((e.clientX - rect.left) / rect.width) * 100)),
+          yPercent: Math.max(0, Math.min(100, ((e.clientY - rect.top) / rect.height) * 100))
+        };
+        render();
+      };
+
+      positionGetters[containerId] = () => pos;
+    }
+
+    function setTickerPosition(mode) {
+      tickerPosition = mode;
+      document.getElementById('ticker-pos-top').className = `flex-1 border rounded-lg py-1.5 text-xs transition ${mode === 'top' ? 'bg-emerald-600 border-emerald-500 text-white' : 'bg-slate-900 border-slate-700 text-slate-300'}`;
+      document.getElementById('ticker-pos-bottom').className = `flex-1 border rounded-lg py-1.5 text-xs transition ${mode === 'bottom' ? 'bg-emerald-600 border-emerald-500 text-white' : 'bg-slate-900 border-slate-700 text-slate-300'}`;
+    }
+
+    // Builds one independent "Image Overlay" card per slot (image_overlay_1, _2, ...),
+    // matching TEMPLATES in server.js, so more than one image can be on air at once.
+    function buildImageOverlayCards() {
+      const container = document.getElementById('image-overlay-cards');
+      container.innerHTML = '';
+      for (let i = 1; i <= IMAGE_OVERLAY_SLOTS; i++) {
+        const slotKey = `image_overlay_${i}`;
+        const card = document.createElement('div');
+        card.className = 'border border-slate-700/50 rounded-lg p-4';
+        card.innerHTML = `
+          <div class="flex items-center justify-between mb-3">
+            <h3 class="text-sm font-medium text-slate-300">Image Overlay ${i}</h3>
+            <span id="graphic-dot-${slotKey}" class="w-2 h-2 rounded-full bg-slate-600"></span>
+          </div>
+          <div class="mb-3 flex items-center gap-3">
+            <img id="${slotKey}-preview" class="w-16 h-16 object-contain bg-slate-900 border border-slate-700 rounded-lg hidden">
+            <input type="file" id="${slotKey}-file" accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml" class="text-xs text-slate-400 flex-1">
+          </div>
+          <div class="mb-3">
+            <label class="text-xs text-slate-500 mb-1 block">Width: <span id="${slotKey}-width-val" class="text-slate-300 font-medium">15%</span></label>
+            <input type="range" id="${slotKey}-width" min="5" max="60" value="15" class="w-full" oninput="document.getElementById('${slotKey}-width-val').textContent = this.value + '%'">
+          </div>
+          <div class="mb-3">
+            <label class="text-xs text-slate-500 mb-1 block">Height: <span id="${slotKey}-height-val" class="text-slate-300 font-medium">15%</span></label>
+            <input type="range" id="${slotKey}-height" min="5" max="60" value="15" class="w-full" oninput="document.getElementById('${slotKey}-height-val').textContent = this.value + '%'">
+          </div>
+          <div class="mb-3">
+            <label class="text-xs text-slate-500 mb-1 block">Position (click to place)</label>
+            <div id="position-${slotKey}" class="w-full max-w-[220px]"></div>
+          </div>
+          <div class="flex gap-2 mb-3">
+            <button class="btn-show bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-medium flex-1 transition">Show</button>
+            <button class="btn-hide bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg text-sm font-medium flex-1 transition">Hide</button>
+            <button class="btn-save bg-slate-700 hover:bg-slate-600 text-white px-3 py-2 rounded-lg text-sm font-medium transition" title="Save current image, size and position as a new preset">Save</button>
+          </div>
+          <div id="presets-${slotKey}" class="flex flex-wrap gap-1.5"></div>`;
+
+        const fileInput = card.querySelector(`#${slotKey}-file`);
+        fileInput.onchange = () => uploadImageOverlay(slotKey, fileInput);
+        card.querySelector('.btn-show').onclick = (e) => showImageOverlay(slotKey, e.currentTarget);
+        card.querySelector('.btn-hide').onclick = (e) => hideGraphic(slotKey, e.currentTarget);
+        card.querySelector('.btn-save').onclick = (e) => saveImageOverlayPreset(slotKey, e.currentTarget);
+        container.appendChild(card);
+
+        const defaultY = 6 + (i - 1) * 22; // matches server.js's default stagger
+        createPositionPicker(`position-${slotKey}`, 3, defaultY);
+      }
+    }
+
+    // Builds one independent "Censor Box" card per slot - a solid occlusion
+    // block, not a true blur (CasparCG's ffmpeg consumer doesn't support the
+    // branching filter graph a real blur needs, and a CG overlay has no
+    // access to the video pixels beneath it either way - see server.js
+    // TEMPLATES comment). Same pattern as the image overlay slots.
+    function buildCensorBoxCards() {
+      const container = document.getElementById('censor-box-cards');
+      container.innerHTML = '';
+      for (let i = 1; i <= CENSOR_BOX_SLOTS; i++) {
+        const slotKey = `censor_box_${i}`;
+        const card = document.createElement('div');
+        card.className = 'border border-slate-700/50 rounded-lg p-4';
+        card.innerHTML = `
+          <div class="flex items-center justify-between mb-3">
+            <h3 class="text-sm font-medium text-slate-300">Censor Box ${i}</h3>
+            <span id="graphic-dot-${slotKey}" class="w-2 h-2 rounded-full bg-slate-600"></span>
+          </div>
+          <div class="mb-3 flex items-center gap-2">
+            <label class="text-xs text-slate-500">Color</label>
+            <input type="color" id="${slotKey}-color" value="#000000" class="w-10 h-8 bg-slate-900 border border-slate-700 rounded cursor-pointer">
+          </div>
+          <div class="mb-3">
+            <label class="text-xs text-slate-500 mb-1 block">Width: <span id="${slotKey}-width-val" class="text-slate-300 font-medium">15%</span></label>
+            <input type="range" id="${slotKey}-width" min="5" max="80" value="15" class="w-full" oninput="document.getElementById('${slotKey}-width-val').textContent = this.value + '%'">
+          </div>
+          <div class="mb-3">
+            <label class="text-xs text-slate-500 mb-1 block">Height: <span id="${slotKey}-height-val" class="text-slate-300 font-medium">15%</span></label>
+            <input type="range" id="${slotKey}-height" min="5" max="80" value="15" class="w-full" oninput="document.getElementById('${slotKey}-height-val').textContent = this.value + '%'">
+          </div>
+          <div class="mb-3">
+            <label class="text-xs text-slate-500 mb-1 block">Position (click to place)</label>
+            <div id="position-${slotKey}" class="w-full max-w-[220px]"></div>
+          </div>
+          <div class="flex gap-2 mb-3">
+            <button class="btn-show bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-medium flex-1 transition">Show</button>
+            <button class="btn-hide bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg text-sm font-medium flex-1 transition">Hide</button>
+            <button class="btn-save bg-slate-700 hover:bg-slate-600 text-white px-3 py-2 rounded-lg text-sm font-medium transition" title="Save current color, size and position as a new preset">Save</button>
+          </div>
+          <div id="presets-${slotKey}" class="flex flex-wrap gap-1.5"></div>`;
+
+        card.querySelector('.btn-show').onclick = (e) => showCensorBox(slotKey, e.currentTarget);
+        card.querySelector('.btn-hide').onclick = (e) => hideGraphic(slotKey, e.currentTarget);
+        card.querySelector('.btn-save').onclick = (e) => saveCensorBoxPreset(slotKey, e.currentTarget);
+        container.appendChild(card);
+
+        const defaultY = 40 + (i - 1) * 15; // matches server.js's default stagger
+        createPositionPicker(`position-${slotKey}`, 40, defaultY);
+      }
+    }
+
+    function censorBoxData(slotKey) {
+      return {
+        color: document.getElementById(`${slotKey}-color`).value,
+        widthPercent: Number(document.getElementById(`${slotKey}-width`).value),
+        heightPercent: Number(document.getElementById(`${slotKey}-height`).value),
+        position: positionGetters[`position-${slotKey}`]()
+      };
+    }
+
+    function showCensorBox(slotKey, btn) { showGraphic(slotKey, censorBoxData(slotKey), btn); }
+    function saveCensorBoxPreset(slotKey, btn) { savePreset(slotKey, censorBoxData(slotKey), btn); }
+
+    // --- Main tab bar (Channels / Graphics / Cloud Streams / System & Logs) ---
+    // The video monitor and status bar live outside these tabs (sticky right
+    // column in the HTML) so they stay visible no matter which tab is open.
+    const MAIN_TABS = ['channels', 'graphics', 'cloud', 'system'];
+
+    function setMainTab(name) {
+      for (const tab of MAIN_TABS) {
+        document.getElementById(`tab-panel-${tab}`).className = tab === name ? 'flex flex-col gap-6' : 'hidden';
+        document.getElementById(`tab-btn-${tab}`).className =
+          `px-4 py-2 rounded-lg text-sm font-medium transition whitespace-nowrap ${tab === name ? 'bg-sky-600 text-white' : 'bg-slate-800 text-slate-400 hover:text-slate-200'}`;
+      }
+      try { localStorage.setItem('mainTab', name); } catch { /* private browsing etc - just won't persist */ }
+    }
+
+    function log(msg, level = 'info') {
+      const entry = document.createElement('div');
+      entry.className = LOG_COLORS[level] || LOG_COLORS.info;
+      entry.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+      const logEl = document.getElementById('log');
+      logEl.appendChild(entry);
+      while (logEl.children.length > 100) logEl.removeChild(logEl.firstChild);
+    }
+
+    // --- Loading indicators ---
+    // Two layers: a global top progress bar for any in-flight request (catches
+    // everything automatically, including things with no dedicated button,
+    // like status polling), and per-button spinners for whichever specific
+    // control the operator actually clicked, so that control visibly shows
+    // it's working and can't be double-clicked mid-request.
+    let pendingRequests = 0;
+
+    function showGlobalLoading() {
+      pendingRequests++;
+      const bar = document.getElementById('global-loading-bar');
+      bar.style.transition = 'width 0.3s ease';
+      bar.style.opacity = '1';
+      bar.style.width = '70%';
+    }
+
+    function hideGlobalLoading() {
+      pendingRequests = Math.max(0, pendingRequests - 1);
+      if (pendingRequests > 0) return;
+      const bar = document.getElementById('global-loading-bar');
+      bar.style.width = '100%';
+      setTimeout(() => {
+        bar.style.opacity = '0';
+        setTimeout(() => { bar.style.transition = 'none'; bar.style.width = '0%'; }, 300);
+      }, 150);
+    }
+
+    function setButtonLoading(btn, loading) {
+      if (!btn) return;
+      // <input type="file"> has no meaningful innerHTML to swap for a spinner -
+      // just disable/dim it instead.
+      if (btn.tagName === 'INPUT') {
+        btn.disabled = loading;
+        btn.classList.toggle('opacity-60', loading);
+        btn.classList.toggle('cursor-wait', loading);
+        return;
+      }
+      if (loading) {
+        if (btn.dataset.originalHtml === undefined) btn.dataset.originalHtml = btn.innerHTML;
+        btn.disabled = true;
+        btn.classList.add('opacity-60', 'cursor-wait', 'pointer-events-none');
+        btn.innerHTML = '<span class="inline-block w-3.5 h-3.5 border-2 border-current border-t-transparent rounded-full animate-spin align-[-3px]"></span>';
+      } else {
+        btn.disabled = false;
+        btn.classList.remove('opacity-60', 'cursor-wait', 'pointer-events-none');
+        if (btn.dataset.originalHtml !== undefined) {
+          btn.innerHTML = btn.dataset.originalHtml;
+          delete btn.dataset.originalHtml;
+        }
+      }
+    }
+
+    // Wraps any async action with a button-level spinner. Pass the triggering
+    // button (usually just "this" from the onclick attribute, or a captured
+    // reference for dynamically-created buttons) - safe to call with no
+    // button at all for actions with nothing sensible to spin (falls back to
+    // just the global bar via api()).
+    async function withLoading(btn, fn) {
+      setButtonLoading(btn, true);
+      try {
+        return await fn();
+      } finally {
+        setButtonLoading(btn, false);
+      }
+    }
+
+    async function api(path, options = {}) {
+      showGlobalLoading();
+      try {
+        const res = await fetch(path, {
+          ...options,
+          headers: { 'Content-Type': 'application/json', ...(options.headers || {}) }
+        });
+        if (res.status === 401) { window.location.href = '/login'; throw new Error('Not authenticated'); }
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(body.message || 'Request failed');
+        return body;
+      } finally {
+        hideGlobalLoading();
+      }
+    }
+
+    async function logout(btn) {
+      await withLoading(btn, async () => {
+        await fetch('/logout', { method: 'POST' });
+        window.location.href = '/login';
+      });
+    }
+
+    // --- Channels ---
+    async function loadChannels() {
+      allChannels = await api('/api/channels');
+      renderChannelList();
+    }
+
+    function renderChannelList() {
+      const container = document.getElementById('channel-list');
+      container.innerHTML = '';
+      for (const ch of allChannels) {
+        const row = document.createElement('div');
+        row.className = `flex items-center justify-between rounded-lg p-2.5 border ${ch.isActive ? 'border-emerald-500/60 bg-emerald-500/10' : 'border-slate-700/50'}`;
+        row.innerHTML = `
+          <div>
+            <div class="text-sm font-medium ${ch.isActive ? 'text-emerald-400' : 'text-slate-200'}">${ch.name}${ch.isActive ? ' (Live)' : ''}</div>
+            <div class="text-xs text-slate-500">${ch.Sources.length} source(s)</div>
+            <div class="text-xs text-slate-600 font-mono break-all">${deriveHlsUrl(ch.rtmpTarget)}</div>
+          </div>
+          <div class="flex gap-2 shrink-0">
+            ${ch.isActive ? '' : `<button class="text-sky-400 hover:text-sky-300 text-xs font-medium">Activate</button>`}
+            ${ch.isActive ? '' : `<button class="text-red-400 hover:text-red-300 text-xs font-medium">Delete</button>`}
+          </div>`;
+        if (!ch.isActive) {
+          const [activateBtn, deleteBtn] = row.querySelectorAll('button');
+          activateBtn.onclick = () => activateChannel(ch.id, activateBtn);
+          deleteBtn.onclick = () => deleteChannel(ch.id, deleteBtn);
+        }
+        container.appendChild(row);
+      }
+    }
+
+    async function activateChannel(id, btn) {
+      log(`Activating channel...`);
+      await withLoading(btn, async () => {
+        try {
+          await api(`/api/channels/${id}/activate`, { method: 'POST' });
+          log('Channel activated', 'success');
+        } catch (err) { log(`Error: ${err.message}`, 'error'); }
+        await refreshAll();
+      });
+    }
+
+    async function deleteChannel(id, btn) {
+      await withLoading(btn, async () => {
+        try {
+          await api(`/api/channels/${id}`, { method: 'DELETE' });
+          log('Channel deleted', 'success');
+        } catch (err) { log(`Error: ${err.message}`, 'error'); }
+        await loadChannels();
+      });
+    }
+
+    function toggleNewChannelForm() {
+      const form = document.getElementById('new-channel-form');
+      form.classList.toggle('hidden');
+      if (!form.classList.contains('hidden') && document.getElementById('nc-sources').children.length === 0) {
+        addNewChannelSourceRow();
+      }
+    }
+
+    function addNewChannelSourceRow() {
+      const row = document.createElement('div');
+      row.className = 'flex gap-2';
+      row.innerHTML = `
+        <input type="text" placeholder="Label" class="nc-src-label flex-1 bg-slate-900 border border-slate-700 rounded-lg p-2 text-slate-100 text-sm focus:outline-none focus:border-sky-500 transition">
+        <input type="text" placeholder="Source URL" class="nc-src-url flex-[2] bg-slate-900 border border-slate-700 rounded-lg p-2 text-slate-100 text-sm focus:outline-none focus:border-sky-500 transition">`;
+      document.getElementById('nc-sources').appendChild(row);
+    }
+
+    async function createChannel(btn) {
+      const name = document.getElementById('nc-name').value;
+      const rtmpTarget = document.getElementById('nc-rtmp').value || undefined; // blank = auto-generate
+      const sources = [...document.querySelectorAll('#nc-sources > div')].map((row, i) => ({
+        label: row.querySelector('.nc-src-label').value || `Source ${i + 1}`,
+        url: row.querySelector('.nc-src-url').value,
+        priority: i
+      })).filter((s) => s.url);
+
+      if (!name) return log('Channel name is required', 'error');
+      if (sources.length === 0) return log('Add at least one source', 'error');
+
+      await withLoading(btn, async () => {
+        try {
+          await api('/api/channels', { method: 'POST', body: JSON.stringify({ name, rtmpTarget, sources }) });
+          log(`Channel "${name}" created`, 'success');
+          document.getElementById('nc-name').value = '';
+          document.getElementById('nc-rtmp').value = '';
+          document.getElementById('nc-sources').innerHTML = '';
+          toggleNewChannelForm();
+        } catch (err) { log(`Error: ${err.message}`, 'error'); }
+        await loadChannels();
+      });
+    }
+
+    // --- Sources (on the active channel) ---
+    async function loadActiveChannel() {
+      activeChannel = await api('/api/channels/active');
+      document.getElementById('active-channel-label').textContent = `Channel: ${activeChannel.name}`;
+      renderSourceButtons();
+      renderPresets();
+      document.getElementById('hls-link').innerText = deriveHlsUrl(activeChannel.rtmpTarget);
+    }
+
+    function deriveHlsUrl(rtmpTarget) {
+      // MediaMTX exposes the same "path" name (the part after the RTMP app) over HLS.
+      const path = rtmpTarget.split('/').slice(3).join('/');
+      return `http://${window.location.hostname}:8888/${path}/index.m3u8`;
+    }
+
+    function renderSourceButtons() {
+      const container = document.getElementById('source-buttons');
+      container.innerHTML = '';
+      const sorted = [...activeChannel.Sources].sort((a, b) => a.priority - b.priority);
+      if (sorted.length === 0) {
+        container.innerHTML = '<span class="text-slate-500 text-sm">No sources yet - add one below.</span>';
+        return;
+      }
+      for (const src of sorted) {
+        const row = document.createElement('div');
+        row.className = 'flex items-center gap-2 bg-slate-900/60 border border-slate-700/50 rounded-lg p-2';
+        row.dataset.sourceId = src.id;
+        row.innerHTML = `
+          <button id="btn-source-${src.id}" class="source-btn bg-sky-600 hover:bg-sky-700 text-white px-3 py-2 rounded-lg font-medium text-sm transition shrink-0">${src.label}</button>
+          <div class="min-w-0 flex-1">
+            <div class="text-xs text-slate-500 truncate font-mono" title="${src.url}">${src.url}</div>
+          </div>
+          <button class="btn-edit-src text-slate-400 hover:text-sky-400 text-xs font-medium px-1.5 shrink-0">Edit</button>
+          <button class="btn-del-src text-slate-400 hover:text-red-400 text-xs font-medium px-1.5 shrink-0">Delete</button>`;
+
+        row.querySelector('.source-btn').onclick = (e) => switchStream(src.id, e.currentTarget);
+        row.querySelector('.btn-edit-src').onclick = () => showEditSourceForm(row, src);
+        row.querySelector('.btn-del-src').onclick = (e) => deleteSource(src.id, e.currentTarget);
+        container.appendChild(row);
+      }
+    }
+
+    function showEditSourceForm(row, src) {
+      row.innerHTML = `
+        <input type="text" value="${src.label}" class="edit-src-label w-28 shrink-0 bg-slate-900 border border-slate-700 rounded-lg p-1.5 text-slate-100 text-sm focus:outline-none focus:border-sky-500 transition">
+        <input type="text" value="${src.url}" class="edit-src-url flex-1 min-w-0 bg-slate-900 border border-slate-700 rounded-lg p-1.5 text-slate-100 text-sm font-mono focus:outline-none focus:border-sky-500 transition">
+        <button class="btn-save-src bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-lg text-xs font-medium transition shrink-0">Save</button>
+        <button class="btn-cancel-src bg-slate-700 hover:bg-slate-600 text-white px-3 py-1.5 rounded-lg text-xs font-medium transition shrink-0">Cancel</button>`;
+      row.querySelector('.btn-save-src').onclick = (e) => updateSource(
+        src.id,
+        row.querySelector('.edit-src-label').value,
+        row.querySelector('.edit-src-url').value,
+        e.currentTarget
+      );
+      row.querySelector('.btn-cancel-src').onclick = () => renderSourceButtons();
+    }
+
+    async function updateSource(id, label, url, btn) {
+      if (!label || !url) return log('Label and URL are required', 'error');
+      await withLoading(btn, async () => {
+        try {
+          await api(`/api/sources/${id}`, { method: 'PUT', body: JSON.stringify({ label, url }) });
+          log(`Source "${label}" updated`, 'success');
+        } catch (err) { log(`Error: ${err.message}`, 'error'); }
+        await loadActiveChannel();
+      });
+    }
+
+    async function deleteSource(id, btn) {
+      if (activeChannel.Sources.length <= 1) return log('Cannot delete the only source on this channel', 'error');
+      if (!confirm('Delete this source?')) return;
+      await withLoading(btn, async () => {
+        try {
+          await api(`/api/sources/${id}`, { method: 'DELETE' });
+          log('Source deleted', 'success');
+        } catch (err) { log(`Error: ${err.message}`, 'error'); }
+        await loadActiveChannel();
+      });
+    }
+
+    function toggleNewSourceForm() {
+      document.getElementById('new-source-form').classList.toggle('hidden');
+    }
+
+    async function addSourceToActiveChannel() {
+      const label = document.getElementById('ns-label').value;
+      const url = document.getElementById('ns-url').value;
+      if (!label || !url) return log('Source label and URL are required', 'error');
+      try {
+        await api(`/api/channels/${activeChannel.id}/sources`, {
+          method: 'POST',
+          body: JSON.stringify({ label, url, priority: activeChannel.Sources.length })
+        });
+        log(`Source "${label}" added`, 'success');
+        document.getElementById('ns-label').value = '';
+        document.getElementById('ns-url').value = '';
+        toggleNewSourceForm();
+      } catch (err) { log(`Error: ${err.message}`, 'error'); }
+      await loadActiveChannel();
+    }
+
+    function setSourceButtonActive(sourceId) {
+      document.querySelectorAll('.source-btn').forEach((btn) => btn.classList.remove('ring-2', 'ring-emerald-400'));
+      const btn = document.getElementById(`btn-source-${sourceId}`);
+      if (btn) btn.classList.add('ring-2', 'ring-emerald-400');
+    }
+
+    async function switchStream(sourceId, btn) {
+      log(`Switching feed...`);
+      await withLoading(btn, async () => {
+        try {
+          const data = await api('/api/stream/play', { method: 'POST', body: JSON.stringify({ sourceId }) });
+          log(`Active Stream: ${data.label}`, 'success');
+        } catch (err) { log(`Error: ${err.message}`, 'error'); }
+        pollStatus();
+      });
+    }
+
+    async function clearChannel() {
+      try {
+        await api('/api/stream/clear', { method: 'POST' });
+        log('Channel Cleared', 'success');
+      } catch (err) { log(`Error: ${err.message}`, 'error'); }
+      pollStatus();
+    }
+
+    // --- Graphics & presets ---
+    async function showGraphic(template, data, btn) {
+      log(`Triggering "${template}" overlay...`);
+      await withLoading(btn, async () => {
+        try {
+          await api('/api/graphic/show', { method: 'POST', body: JSON.stringify({ template, data }) });
+          log(`Graphic ON: "${template}"`, 'success');
+        } catch (err) { log(`Error: ${err.message}`, 'error'); }
+        pollStatus();
+      });
+    }
+
+    async function hideGraphic(template, btn) {
+      log(`Taking down "${template}" overlay...`);
+      await withLoading(btn, async () => {
+        try {
+          await api('/api/graphic/hide', { method: 'POST', body: JSON.stringify({ template }) });
+          log(`Graphic OFF: "${template}"`, 'success');
+        } catch (err) { log(`Error: ${err.message}`, 'error'); }
+        pollStatus();
+      });
+    }
+
+    function lowerThirdData() {
+      return {
+        title: document.getElementById('lower_third-title').value,
+        subtitle: document.getElementById('lower_third-subtitle').value,
+        position: positionGetters['position-lower_third']()
+      };
+    }
+    function logoBugData() {
+      return {
+        text: document.getElementById('logo_bug-text').value,
+        position: positionGetters['position-logo_bug']()
+      };
+    }
+    function tickerData() {
+      return {
+        text: document.getElementById('ticker-text').value,
+        position: { mode: tickerPosition }
+      };
+    }
+    function imageOverlayData(slotKey) {
+      return {
+        imageUrl: uploadedImageUrls[slotKey] || '',
+        widthPercent: Number(document.getElementById(`${slotKey}-width`).value),
+        heightPercent: Number(document.getElementById(`${slotKey}-height`).value),
+        position: positionGetters[`position-${slotKey}`]()
+      };
+    }
+
+    function showLowerThird(btn) { showGraphic('lower_third', lowerThirdData(), btn); }
+    function showLogoBug(btn) { showGraphic('logo_bug', logoBugData(), btn); }
+    function showTicker(btn) { showGraphic('ticker', tickerData(), btn); }
+
+    function showImageOverlay(slotKey, btn) {
+      if (!uploadedImageUrls[slotKey]) return log('Upload an image first', 'error');
+      showGraphic(slotKey, imageOverlayData(slotKey), btn);
+    }
+
+    async function uploadImageOverlay(slotKey, inputEl) {
+      const file = inputEl.files[0];
+      if (!file) return;
+      log('Uploading image...');
+      await withLoading(inputEl, async () => {
+        try {
+          const formData = new FormData();
+          formData.append('image', file);
+          const res = await fetch('/api/assets/upload', { method: 'POST', body: formData });
+          if (res.status === 401) { window.location.href = '/login'; return; }
+          const body = await res.json();
+          if (!res.ok) throw new Error(body.message || 'Upload failed');
+          uploadedImageUrls[slotKey] = body.url;
+          const preview = document.getElementById(`${slotKey}-preview`);
+          preview.src = body.url;
+          preview.classList.remove('hidden');
+          log('Image uploaded', 'success');
+        } catch (err) { log(`Error: ${err.message}`, 'error'); }
+      });
+    }
+
+    async function savePreset(template, data, btn) {
+      const name = prompt(`Name this ${template.replace('_', ' ')} preset:`);
+      if (!name) return;
+      await withLoading(btn, async () => {
+        try {
+          await api(`/api/channels/${activeChannel.id}/presets`, { method: 'POST', body: JSON.stringify({ name, template, data }) });
+          log(`Preset "${name}" saved`, 'success');
+        } catch (err) { log(`Error: ${err.message}`, 'error'); }
+        await loadActiveChannel();
+      });
+    }
+
+    function saveLowerThirdPreset(btn) { savePreset('lower_third', lowerThirdData(), btn); }
+    function saveLogoBugPreset(btn) { savePreset('logo_bug', logoBugData(), btn); }
+    function saveTickerPreset(btn) { savePreset('ticker', tickerData(), btn); }
+    function saveImageOverlayPreset(slotKey, btn) {
+      if (!uploadedImageUrls[slotKey]) return log('Upload an image first', 'error');
+      savePreset(slotKey, imageOverlayData(slotKey), btn);
+    }
+
+    async function applyPreset(id, btn) {
+      await withLoading(btn, async () => {
+        try {
+          const data = await api(`/api/presets/${id}/apply`, { method: 'POST' });
+          log(`Preset applied: "${data.template}"`, 'success');
+        } catch (err) { log(`Error: ${err.message}`, 'error'); }
+        pollStatus();
+      });
+    }
+
+    async function deletePreset(id, btn) {
+      await withLoading(btn, async () => {
+        try {
+          await api(`/api/presets/${id}`, { method: 'DELETE' });
+          log('Preset deleted', 'success');
+        } catch (err) { log(`Error: ${err.message}`, 'error'); }
+        await loadActiveChannel();
+      });
+    }
+
+    async function setPresetDefault(id, isDefault, btn) {
+      await withLoading(btn, async () => {
+        try {
+          await api(`/api/presets/${id}/set-default`, { method: 'POST', body: JSON.stringify({ isDefault }) });
+          log(isDefault ? 'Set as default - will auto-apply on activate/reconnect' : 'Unset as default', 'success');
+        } catch (err) { log(`Error: ${err.message}`, 'error'); }
+        await loadActiveChannel();
+      });
+    }
+
+    function renderPresets() {
+      const imageOverlayKeys = Array.from({ length: IMAGE_OVERLAY_SLOTS }, (_, i) => `image_overlay_${i + 1}`);
+      const censorBoxKeys = Array.from({ length: CENSOR_BOX_SLOTS }, (_, i) => `censor_box_${i + 1}`);
+      for (const template of ['lower_third', 'logo_bug', 'ticker', ...imageOverlayKeys, ...censorBoxKeys]) {
+        const container = document.getElementById(`presets-${template}`);
+        container.innerHTML = '';
+        const presets = activeChannel.BrandingPresets.filter((p) => p.template === template);
+        for (const preset of presets) {
+          const chip = document.createElement('div');
+          chip.className = `flex items-center gap-1 bg-slate-900 border rounded-full pl-3 pr-1 py-1 text-xs ${preset.isDefault ? 'border-amber-500/60' : 'border-slate-700'}`;
+          chip.innerHTML = `<span class="${preset.isDefault ? 'text-amber-400' : 'text-slate-300'}">${preset.isDefault ? '★ ' : ''}${preset.name}</span>`;
+          const applyBtn = document.createElement('button');
+          applyBtn.textContent = 'Apply';
+          applyBtn.className = 'text-sky-400 hover:text-sky-300 ml-1 px-1.5';
+          applyBtn.onclick = (e) => applyPreset(preset.id, e.currentTarget);
+          const defaultBtn = document.createElement('button');
+          defaultBtn.textContent = preset.isDefault ? 'Unset default' : 'Set default';
+          defaultBtn.title = 'Auto-apply this preset whenever the channel activates or CasparCG reconnects';
+          defaultBtn.className = 'text-amber-400 hover:text-amber-300 px-1.5';
+          defaultBtn.onclick = (e) => setPresetDefault(preset.id, !preset.isDefault, e.currentTarget);
+          const delBtn = document.createElement('button');
+          delBtn.textContent = '×';
+          delBtn.className = 'text-slate-500 hover:text-red-400 px-1.5';
+          delBtn.onclick = (e) => deletePreset(preset.id, e.currentTarget);
+          chip.appendChild(applyBtn);
+          chip.appendChild(defaultBtn);
+          chip.appendChild(delBtn);
+          container.appendChild(chip);
+        }
+      }
+    }
+
+    // --- System ---
+    async function restartProcess(target, btn) {
+      if (!confirm(`Restart ${target}? It'll be briefly unavailable.`)) return;
+      await withLoading(btn, async () => {
+        try {
+          await api('/api/system/restart', { method: 'POST', body: JSON.stringify({ target }) });
+          log(`${target} restart triggered`, 'success');
+        } catch (err) { log(`Error: ${err.message}`, 'error'); }
+      });
+    }
+
+    async function pollProcessStatus() {
+      try {
+        const s = await api('/api/system/status');
+        document.getElementById('dot-proc-casparcg').className = `w-2.5 h-2.5 rounded-full ${s.casparcg ? 'bg-emerald-500' : 'bg-red-500'}`;
+        document.getElementById('dot-proc-mediamtx').className = `w-2.5 h-2.5 rounded-full ${s.mediamtx ? 'bg-emerald-500' : 'bg-red-500'}`;
+      } catch { /* status bar already reflects auth/connection issues */ }
+    }
+
+    // --- Process console (dashboard/casparcg/mediamtx live output via SSE) ---
+    function setProcessTab(name) {
+      currentProcessTab = name;
+      for (const tab of ['dashboard', 'casparcg', 'mediamtx']) {
+        document.getElementById(`proc-tab-${tab}`).className =
+          `px-3 py-1 rounded-lg text-xs font-medium transition ${tab === name ? 'bg-sky-600 text-white' : 'bg-slate-900 text-slate-400'}`;
+      }
+      renderProcessLog();
+    }
+
+    function renderProcessLog() {
+      const el = document.getElementById('process-log');
+      el.textContent = processLogBuffers[currentProcessTab].map((e) => `[${new Date(e.ts).toLocaleTimeString()}] ${e.line}`).join('\n');
+      el.scrollTop = el.scrollHeight;
+    }
+
+    function connectProcessLogStream() {
+      const es = new EventSource('/api/logs/stream');
+      es.onmessage = (event) => {
+        const entry = JSON.parse(event.data);
+        const buf = processLogBuffers[entry.source];
+        if (!buf) return;
+        buf.push(entry);
+        if (buf.length > 500) buf.shift();
+        if (entry.source === currentProcessTab) {
+          const el = document.getElementById('process-log');
+          const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+          el.textContent += (el.textContent ? '\n' : '') + `[${new Date(entry.ts).toLocaleTimeString()}] ${entry.line}`;
+          if (atBottom) el.scrollTop = el.scrollHeight;
+        }
+      };
+      es.onerror = () => { es.close(); setTimeout(connectProcessLogStream, 3000); };
+    }
+
+    // --- Cloud Streams (any stream source -> HLS via the VM's MediaMTX) ---
+    let cloudStreams = [];
+
+    // Separate from the stream list itself: GET /api/cloud-streams alone
+    // can't tell you the VM is reachable when there are zero saved streams
+    // (it has no slugs to check, so it skips contacting the VM entirely) -
+    // this hits the VM directly regardless of how many streams exist.
+    async function pollCloudVmStatus() {
+      try {
+        const { reachable } = await api('/api/cloud-streams/vm-status');
+        document.getElementById('dot-cloud-vm').className = `w-2.5 h-2.5 rounded-full ${reachable ? 'bg-emerald-500' : 'bg-red-500'}`;
+        document.getElementById('cloud-vm-label').textContent = reachable ? 'Reachable' : 'Unreachable';
+      } catch {
+        document.getElementById('dot-cloud-vm').className = 'w-2.5 h-2.5 rounded-full bg-slate-600';
+        document.getElementById('cloud-vm-label').textContent = 'Unknown';
+      }
+    }
+
+    async function loadCloudStreams() {
+      try {
+        cloudStreams = await api('/api/cloud-streams');
+      } catch (err) {
+        return; // VM/dashboard hiccup - leave the existing list showing rather than blanking it
+      }
+      renderCloudStreamList();
+    }
+
+    function renderCloudStreamList() {
+      const container = document.getElementById('cloud-stream-list');
+      container.innerHTML = '';
+      if (cloudStreams.length === 0) {
+        container.innerHTML = '<span class="text-slate-500 text-sm">No cloud streams yet - add a source below.</span>';
+        return;
+      }
+      for (const s of cloudStreams) {
+        const dotClass = s.running === true ? 'bg-emerald-500' : s.running === false ? 'bg-slate-600' : 'bg-amber-500';
+        const statusTitle = s.running === true ? 'Running' : s.running === false ? 'Stopped' : 'VM unreachable - status unknown';
+        const row = document.createElement('div');
+        row.className = 'flex items-center justify-between rounded-lg p-2.5 border border-slate-700/50 gap-3';
+        row.innerHTML = `
+          <div class="min-w-0 flex-1">
+            <div class="text-sm font-medium text-slate-200 flex items-center gap-2">
+              <span class="w-2 h-2 rounded-full ${dotClass}" title="${statusTitle}"></span>
+              ${s.name}
+            </div>
+            <div class="text-xs text-slate-500 font-mono break-all">${s.sourceUrl}</div>
+            <div class="text-xs text-sky-400 font-mono break-all select-all mt-0.5">${s.hlsUrl}</div>
+          </div>
+          <div class="flex gap-2 shrink-0">
+            <button class="btn-toggle bg-amber-600 hover:bg-amber-700 text-white px-3 py-1.5 rounded-lg text-xs font-medium transition">${s.running === false ? 'Start' : 'Stop'}</button>
+            <button class="btn-delete text-red-400 hover:text-red-300 text-xs font-medium">Delete</button>
+          </div>`;
+        const [toggleBtn, deleteBtn] = row.querySelectorAll('button');
+        toggleBtn.onclick = () => toggleCloudStream(s, toggleBtn);
+        deleteBtn.onclick = () => deleteCloudStream(s.id, deleteBtn);
+        container.appendChild(row);
+      }
+    }
+
+    function toggleNewCloudStreamForm() {
+      document.getElementById('new-cloud-stream-form').classList.toggle('hidden');
+    }
+
+    async function createCloudStream(btn) {
+      const name = document.getElementById('cs-name').value;
+      const sourceUrl = document.getElementById('cs-source-url').value;
+      if (!name) return log('Stream name is required', 'error');
+      if (!sourceUrl) return log('Source URL is required', 'error');
+
+      await withLoading(btn, async () => {
+        try {
+          const stream = await api('/api/cloud-streams', { method: 'POST', body: JSON.stringify({ name, sourceUrl }) });
+          log(`Cloud stream "${name}" started - HLS: ${stream.hlsUrl}`, 'success');
+          document.getElementById('cs-name').value = '';
+          document.getElementById('cs-source-url').value = '';
+          toggleNewCloudStreamForm();
+        } catch (err) { log(`Error: ${err.message}`, 'error'); }
+        await loadCloudStreams();
+      });
+    }
+
+    async function toggleCloudStream(stream, btn) {
+      const action = stream.running === false ? 'start' : 'stop';
+      await withLoading(btn, async () => {
+        try {
+          await api(`/api/cloud-streams/${stream.id}/${action}`, { method: 'POST' });
+          log(`Cloud stream "${stream.name}" ${action === 'start' ? 'started' : 'stopped'}`, 'success');
+        } catch (err) { log(`Error: ${err.message}`, 'error'); }
+        await loadCloudStreams();
+      });
+    }
+
+    async function deleteCloudStream(id, btn) {
+      await withLoading(btn, async () => {
+        try {
+          await api(`/api/cloud-streams/${id}`, { method: 'DELETE' });
+          log('Cloud stream deleted', 'success');
+        } catch (err) { log(`Error: ${err.message}`, 'error'); }
+        await loadCloudStreams();
+      });
+    }
+
+    // --- Status polling ---
+    async function pollStatus() {
+      try {
+        const s = await api('/api/status');
+        document.getElementById('dot-caspar').className = `w-2.5 h-2.5 rounded-full ${s.casparConnected ? 'bg-emerald-500' : 'bg-red-500'}`;
+        document.getElementById('dot-stream').className = `w-2.5 h-2.5 rounded-full ${s.streamConsumerActive ? 'bg-emerald-500' : 'bg-slate-600'}`;
+        document.getElementById('status-source').textContent = s.activeSourceLabel || 'None';
+        setSourceButtonActive(s.activeSourceId);
+        for (const [template, visible] of Object.entries(s.activeGraphics || {})) {
+          const dot = document.getElementById(`graphic-dot-${template}`);
+          if (dot) dot.className = `w-2 h-2 rounded-full ${visible ? 'bg-emerald-500' : 'bg-slate-600'}`;
+        }
+      } catch {
+        document.getElementById('dot-caspar').className = 'w-2.5 h-2.5 rounded-full bg-red-500';
+      }
+    }
+
+    // --- Live preview (HLS) ---
+    // MediaMTX's WebRTC output can't carry this feed's AAC audio track at all
+    // (browsers only support Opus over WebRTC), so the preview uses HLS instead,
+    // which carries the same H264+AAC feed CasparCG is already pushing.
+    const video = document.getElementById('preview');
+    const offlineOverlay = document.getElementById('preview-offline');
+    let hls = null;
+
+    function startPreview(hlsUrl) {
+      if (hls) hls.destroy();
+      if (window.Hls && Hls.isSupported()) {
+        hls = new Hls({ liveSyncDurationCount: 3 });
+        hls.loadSource(hlsUrl);
+        hls.attachMedia(video);
+        hls.on(Hls.Events.ERROR, (_evt, data) => {
+          if (data.fatal) {
+            offlineOverlay.classList.remove('hidden');
+            setTimeout(() => hls.loadSource(hlsUrl), 4000);
+          }
+        });
+      } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+        video.src = hlsUrl;
+      } else {
+        offlineOverlay.textContent = 'HLS playback not supported in this browser.';
+      }
+    }
+    video.addEventListener('playing', () => offlineOverlay.classList.add('hidden'));
+    video.addEventListener('waiting', () => offlineOverlay.classList.remove('hidden'));
+
+    async function refreshAll() {
+      await loadChannels();
+      await loadActiveChannel();
+      startPreview(deriveHlsUrl(activeChannel.rtmpTarget));
+      pollStatus();
+    }
+
+    // Restore whichever tab was open last for this browser, defaulting to Channels.
+    let initialMainTab = 'channels';
+    try { if (MAIN_TABS.includes(localStorage.getItem('mainTab'))) initialMainTab = localStorage.getItem('mainTab'); } catch { /* ignore */ }
+    setMainTab(initialMainTab);
+
+    // Position pickers - defaults match TEMPLATES.defaultData in server.js.
+    createPositionPicker('position-lower_third', 5, 75);
+    createPositionPicker('position-logo_bug', 82, 6);
+    setTickerPosition('bottom');
+    buildImageOverlayCards();
+    buildCensorBoxCards();
+
+    setProcessTab('dashboard');
+    connectProcessLogStream();
+    pollProcessStatus();
+    setInterval(pollProcessStatus, 3000);
+
+    refreshAll();
+    setInterval(pollStatus, 3000);
+
+    // Cloud stream status is a live SSH/docker query against the VM, not a
+    // free in-process check - polled far less often than pollStatus to avoid
+    // opening a new SSH connection every few seconds.
+    loadCloudStreams();
+    setInterval(loadCloudStreams, 15000);
+    pollCloudVmStatus();
+    setInterval(pollCloudVmStatus, 15000);
+  </script>
+</body>
+</html>

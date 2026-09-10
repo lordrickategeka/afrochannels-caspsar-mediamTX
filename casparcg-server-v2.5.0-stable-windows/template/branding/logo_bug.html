@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Logo Bug Overlay</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      width: 1920px;
+      height: 1080px;
+      overflow: hidden;
+      background: transparent;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    }
+
+    /* Default position (broadcast safe zone); overridden inline by update()
+       when a "position" is supplied, so this is just the fallback. */
+    .bug {
+      position: absolute;
+      top: 60px;
+      right: 80px;
+      background: rgba(15, 23, 42, 0.75);
+      color: #ffffff;
+      padding: 10px 22px;
+      font-size: 24px;
+      font-weight: 700;
+      letter-spacing: 1px;
+      border-right: 5px solid #ff0055;
+      box-shadow: 0 6px 18px rgba(0, 0, 0, 0.3);
+      opacity: 0;
+      transition: opacity 0.3s ease;
+    }
+
+    .bug.active {
+      opacity: 1;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="bug" id="overlay">
+    <span id="text">CH 06</span>
+  </div>
+
+  <script>
+    const overlay = document.getElementById('overlay');
+    const textEl = document.getElementById('text');
+
+    // 1. Called by CasparCG to update data dynamically
+    function update(str) {
+      let data = str;
+      if (typeof str === 'string') {
+        try {
+          data = JSON.parse(str);
+        } catch (e) {
+          data = {};
+        }
+      }
+
+      if (data.text) textEl.innerText = data.text;
+
+      // position: { xPercent, yPercent } of the 1920x1080 canvas, set from the
+      // dashboard's click-to-place picker. Overrides the CSS default above.
+      if (data.position) {
+        overlay.style.left = (data.position.xPercent / 100) * 1920 + 'px';
+        overlay.style.top = (data.position.yPercent / 100) * 1080 + 'px';
+        overlay.style.right = 'auto';
+      }
+    }
+
+    // 2. Called by CasparCG when layer is triggered to PLAY
+    function play() {
+      overlay.classList.add('active');
+    }
+
+    // 3. Called by CasparCG when layer is triggered to STOP
+    function stop() {
+      overlay.classList.remove('active');
+    }
+  </script>
+</body>
+</html>

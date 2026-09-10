@@ -1,0 +1,83 @@
+# ---------------------------------------------------------------
+# Afro-channels — root ignore rules
+# ---------------------------------------------------------------
+
+# --- Node / dashboard -------------------------------------------
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm/
+.pnp.*
+
+# --- Secrets & local config -------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+
+# --- Databases ---------------------------------------------------
+*.sqlite
+*.sqlite3
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.db
+
+# --- User uploads (runtime content, not source) -------------------
+amcp-dashboard/public/uploads/*
+!amcp-dashboard/public/uploads/.gitkeep
+
+# --- Logs & process manager --------------------------------------
+*.log
+logs/
+pm2.log
+.pm2/
+
+# ---------------------------------------------------------------
+# CasparCG Server — vendor distribution (~500 MB of binaries).
+# Download the release instead of committing it; only our own
+# config and branding templates are tracked.
+# ---------------------------------------------------------------
+casparcg-server-v2.5.0-stable-windows/*
+!casparcg-server-v2.5.0-stable-windows/casparcg.config
+!casparcg-server-v2.5.0-stable-windows/casparcg_auto_restart.bat
+!casparcg-server-v2.5.0-stable-windows/template/
+casparcg-server-v2.5.0-stable-windows/template/*
+!casparcg-server-v2.5.0-stable-windows/template/branding/
+
+# ---------------------------------------------------------------
+# MediaMTX — vendor distribution; only our config is tracked.
+# ---------------------------------------------------------------
+mediamtx_v1.20.1_windows_amd64/*
+!mediamtx_v1.20.1_windows_amd64/mediamtx.yml
+
+# --- Media / rendered output --------------------------------------
+media/
+recordings/
+*.mp4
+*.mov
+*.mkv
+*.mxf
+*.avi
+*.wav
+*.mp3
+*.m3u8
+# MPEG-TS segments/recordings. Delete this line if the project ever adds TypeScript.
+*.ts
+
+# --- Editor / OS cruft ---------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+Thumbs.db
+ehthumbs.db
+desktop.ini
+.DS_Store
+
+# --- Claude Code local overrides -----------------------------------
+.claude/settings.local.json

@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Ticker Overlay</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      width: 1920px;
+      height: 1080px;
+      overflow: hidden;
+      background: transparent;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    }
+
+    /* Default position (bottom); overridden inline by update() when a
+       "position.mode" of "top" is supplied. Always full-width - a ticker
+       doesn't have a meaningful horizontal position. */
+    .ticker-bar {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      width: 100%;
+      height: 64px;
+      background: #0f172a;
+      border-top: 4px solid #ff0055;
+      overflow: hidden;
+      opacity: 0;
+      transition: opacity 0.3s ease;
+    }
+
+    .ticker-bar.active {
+      opacity: 1;
+    }
+
+    .ticker-track {
+      position: absolute;
+      top: 0;
+      left: 0;
+      height: 100%;
+      display: flex;
+      align-items: center;
+      white-space: nowrap;
+      color: #ffffff;
+      font-size: 28px;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+      padding-left: 100%;
+      animation: scroll-left linear infinite;
+      animation-duration: 20s;
+    }
+
+    @keyframes scroll-left {
+      from { transform: translateX(0); }
+      to { transform: translateX(-100%); }
+    }
+  </style>
+</head>
+<body>
+
+  <div class="ticker-bar" id="overlay">
+    <div class="ticker-track" id="track">BREAKING NEWS...</div>
+  </div>
+
+  <script>
+    const overlay = document.getElementById('overlay');
+    const track = document.getElementById('track');
+
+    function restartAnimation(text) {
+      // Scale scroll duration to text length so longer messages don't fly by too fast.
+      const duration = Math.max(12, text.length * 0.18);
+      track.style.animation = 'none';
+      track.textContent = text;
+      void track.offsetWidth; // force reflow so the animation restarts cleanly
+      track.style.animation = `scroll-left linear infinite`;
+      track.style.animationDuration = `${duration}s`;
+    }
+
+    // 1. Called by CasparCG to update data dynamically
+    function update(str) {
+      let data = str;
+      if (typeof str === 'string') {
+        try {
+          data = JSON.parse(str);
+        } catch (e) {
+          data = {};
+        }
+      }
+
+      if (data.text) restartAnimation(data.text);
+
+      // position.mode: "top" | "bottom" - a ticker is always full-width, so
+      // only the vertical placement is meaningful.
+      if (data.position?.mode === 'top') {
+        overlay.style.top = '0';
+        overlay.style.bottom = 'auto';
+        overlay.style.borderTop = 'none';
+        overlay.style.borderBottom = '4px solid #ff0055';
+      } else if (data.position?.mode === 'bottom') {
+        overlay.style.bottom = '0';
+        overlay.style.top = 'auto';
+        overlay.style.borderBottom = 'none';
+        overlay.style.borderTop = '4px solid #ff0055';
+      }
+    }
+
+    // 2. Called by CasparCG when layer is triggered to PLAY
+    function play() {
+      overlay.classList.add('active');
+    }
+
+    // 3. Called by CasparCG when layer is triggered to STOP
+    function stop() {
+      overlay.classList.remove('active');
+    }
+  </script>
+</body>
+</html>

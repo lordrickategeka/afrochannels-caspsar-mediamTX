@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Lower Third Overlay</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      width: 1920px;
+      height: 1080px;
+      overflow: hidden;
+      background: transparent;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    }
+
+    /* Default position (broadcast safe zone); overridden inline by update()
+       when a "position" is supplied, so this is just the fallback. The entrance
+       animation is a plain fade+rise rather than a directional slide since the
+       position can now be anywhere on screen, not just the bottom-left. */
+    .lower-third {
+      position: absolute;
+      bottom: 90px;
+      left: 100px;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      opacity: 0;
+      transform: translateY(20px);
+      transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.3s ease;
+    }
+
+    .lower-third.active {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    .title-box {
+      background: #0f172a;
+      color: #ffffff;
+      padding: 14px 28px;
+      font-size: 32px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      border-left: 6px solid #ff0055;
+      box-shadow: 0 10px 25px rgba(0, 0, 0, 0.3);
+    }
+
+    .subtitle-box {
+      background: #ff0055;
+      color: #ffffff;
+      padding: 8px 22px;
+      font-size: 20px;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+      margin-top: 4px;
+      box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
+    }
+  </style>
+</head>
+<body>
+
+  <div class="lower-third" id="overlay">
+    <div class="title-box" id="title">JANE DOE</div>
+    <div class="subtitle-box" id="subtitle">Lead Broadcast Engineer</div>
+  </div>
+
+  <script>
+    const overlay = document.getElementById('overlay');
+    const titleEl = document.getElementById('title');
+    const subtitleEl = document.getElementById('subtitle');
+
+    // 1. Called by CasparCG to update data dynamically
+    function update(str) {
+      let data = str;
+      if (typeof str === 'string') {
+        try {
+          data = JSON.parse(str);
+        } catch (e) {
+          data = {};
+        }
+      }
+
+      if (data.title) titleEl.innerText = data.title;
+      if (data.subtitle) subtitleEl.innerText = data.subtitle;
+
+      // position: { xPercent, yPercent } of the 1920x1080 canvas, set from the
+      // dashboard's click-to-place picker. Overrides the CSS default above.
+      if (data.position) {
+        overlay.style.left = (data.position.xPercent / 100) * 1920 + 'px';
+        overlay.style.top = (data.position.yPercent / 100) * 1080 + 'px';
+        overlay.style.bottom = 'auto';
+      }
+    }
+
+    // 2. Called by CasparCG when layer is triggered to PLAY
+    function play() {
+      overlay.classList.add('active');
+    }
+
+    // 3. Called by CasparCG when layer is triggered to STOP
+    function stop() {
+      overlay.classList.remove('active');
+    }
+  </script>
+</body>
+</html>

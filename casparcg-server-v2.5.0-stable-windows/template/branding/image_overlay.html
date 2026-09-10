@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Image Overlay</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      width: 1920px;
+      height: 1080px;
+      overflow: hidden;
+      background: transparent;
+    }
+
+    /* Default position/size; overridden inline by update(). */
+    .image-overlay {
+      position: absolute;
+      top: 60px;
+      left: 60px;
+      width: 20%;
+      height: 20%;
+      opacity: 0;
+      transition: opacity 0.3s ease;
+    }
+
+    .image-overlay.active {
+      opacity: 1;
+    }
+
+    .image-overlay img {
+      display: block;
+      width: 100%;
+      height: 100%;
+      /* Width and height are independently controllable, which won't always
+         match the image's native aspect ratio - "contain" fits it inside that
+         box without stretching/distorting it, letterboxing if needed, rather
+         than "fill" which would warp the image to the exact box shape. */
+      object-fit: contain;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="image-overlay" id="overlay">
+    <img id="image" src="" alt="">
+  </div>
+
+  <script>
+    const overlay = document.getElementById('overlay');
+    const imageEl = document.getElementById('image');
+
+    // 1. Called by CasparCG to update data dynamically
+    function update(str) {
+      let data = str;
+      if (typeof str === 'string') {
+        try {
+          data = JSON.parse(str);
+        } catch (e) {
+          data = {};
+        }
+      }
+
+      if (data.imageUrl) imageEl.src = data.imageUrl;
+
+      // position: { xPercent, yPercent } of the 1920x1080 canvas (top-left
+      // corner of the image), set from the dashboard's click-to-place picker.
+      if (data.position) {
+        overlay.style.left = (data.position.xPercent / 100) * 1920 + 'px';
+        overlay.style.top = (data.position.yPercent / 100) * 1080 + 'px';
+      }
+
+      // widthPercent/heightPercent: size of the overlay box as independent
+      // percentages of the 1920x1080 canvas - the image is fitted inside that
+      // box (see object-fit: contain above) rather than the box following the
+      // image's own aspect ratio.
+      if (data.widthPercent) {
+        overlay.style.width = data.widthPercent + '%';
+      }
+      if (data.heightPercent) {
+        overlay.style.height = data.heightPercent + '%';
+      }
+    }
+
+    // 2. Called by CasparCG when layer is triggered to PLAY
+    function play() {
+      overlay.classList.add('active');
+    }
+
+    // 3. Called by CasparCG when layer is triggered to STOP
+    function stop() {
+      overlay.classList.remove('active');
+    }
+  </script>
+</body>
+</html>
