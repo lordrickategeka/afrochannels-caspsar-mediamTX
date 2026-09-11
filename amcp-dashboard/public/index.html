@@ -1050,7 +1050,8 @@
               ${s.name}
             </div>
             <div class="text-xs text-slate-500 font-mono break-all">${s.sourceUrl}</div>
-            <div class="text-xs text-sky-400 font-mono break-all select-all mt-0.5">${s.hlsUrl}</div>
+            <div class="text-xs text-sky-400 font-mono break-all select-all mt-0.5">${s.hlsUrls?.lan ?? s.hlsUrl}</div>
+            ${s.hlsUrls?.tailscale ? `<div class="text-xs text-violet-400 font-mono break-all select-all mt-0.5"><span class="text-slate-500">Tailscale:</span> ${s.hlsUrls.tailscale}</div>` : ''}
           </div>
           <div class="flex gap-2 shrink-0">
             <button class="btn-toggle bg-amber-600 hover:bg-amber-700 text-white px-3 py-1.5 rounded-lg text-xs font-medium transition">${s.running === false ? 'Start' : 'Stop'}</button>
@@ -1084,7 +1085,8 @@
       await withLoading(btn, async () => {
         try {
           const stream = await api('/api/cloud-streams', { method: 'POST', body: JSON.stringify({ name, sourceUrl, program }) });
-          log(`Cloud stream "${name}" started - HLS: ${stream.hlsUrl}`, 'success');
+          const tsNote = stream.hlsUrls?.tailscale ? ` | Tailscale: ${stream.hlsUrls.tailscale}` : '';
+          log(`Cloud stream "${name}" started - HLS: ${stream.hlsUrl}${tsNote}`, 'success');
           document.getElementById('cs-name').value = '';
           document.getElementById('cs-source-url').value = '';
           document.getElementById('cs-program').value = '';

@@ -18,6 +18,12 @@ const VM_SSH_PASSWORD = process.env.VM_SSH_PASSWORD;
 const MEDIAMTX_PUBLISH_USER = process.env.MEDIAMTX_PUBLISH_USER || 'syscg-publisher';
 const MEDIAMTX_PUBLISH_PASSWORD = process.env.MEDIAMTX_PUBLISH_PASSWORD;
 const MEDIAMTX_HLS_BASE = process.env.MEDIAMTX_HLS_BASE;
+// Optional second base for the same MediaMTX HLS listener, reached over
+// Tailscale instead of the LAN - both work simultaneously since MediaMTX
+// binds 0.0.0.0:8888, so the same path is valid on either host. Useful when
+// the dashboard is browsed from a LAN address but the link needs to go to
+// someone off that LAN. Unset = that variant simply isn't offered.
+const MEDIAMTX_HLS_BASE_TAILSCALE = process.env.MEDIAMTX_HLS_BASE_TAILSCALE;
 
 // Source URLs are user-submitted from the dashboard UI and get interpolated
 // straight into a remote shell command below - this allow-list (scheme +
@@ -117,6 +123,19 @@ function containerName(slug) {
 function hlsUrl(slug) {
   assertSafeSlug(slug);
   return `${MEDIAMTX_HLS_BASE}/live/${slug}/index.m3u8`;
+}
+
+// All configured HLS link variants for a slug - currently just the LAN one
+// (always present) and, if MEDIAMTX_HLS_BASE_TAILSCALE is set, a second link
+// over Tailscale to the same path. tailscale is null rather than omitted so
+// callers don't need an "in" check to know it wasn't configured.
+function hlsUrls(slug) {
+  return {
+    lan: hlsUrl(slug),
+    tailscale: MEDIAMTX_HLS_BASE_TAILSCALE
+      ? `${MEDIAMTX_HLS_BASE_TAILSCALE}/live/${slug}/index.m3u8`
+      : null
+  };
 }
 
 /**
@@ -250,4 +269,4 @@ async function getStatus(slugs) {
   });
 }
 
-module.exports = { startIngest, stopIngest, resumeIngest, removeIngest, getStatus, isReachable, hlsUrl, containerName };
+module.exports = { startIngest, stopIngest, resumeIngest, removeIngest, getStatus, isReachable, hlsUrl, hlsUrls, containerName };

@@ -740,7 +740,11 @@ app.get('/api/cloud-streams', async (req, res) => {
   }
   res.json(streams.map((s) => ({
     ...s.toJSON(),
+    // hlsUrl kept for anything already reading it; hlsUrls carries both
+    // variants (lan always, tailscale only if MEDIAMTX_HLS_BASE_TAILSCALE
+    // is configured - see vm-control.js).
     hlsUrl: vmControl.hlsUrl(s.slug),
+    hlsUrls: vmControl.hlsUrls(s.slug),
     running: s.slug in statusBySlug ? statusBySlug[s.slug] : null
   })));
 });
@@ -762,7 +766,7 @@ app.post('/api/cloud-streams', async (req, res) => {
     await vmControl.startIngest(slug, sourceUrl, program);
     const stream = await CloudStream.create({ name, slug, sourceUrl });
     console.log(`[CloudStream] Started ingest "${name}" (${slug}) -> ${vmControl.hlsUrl(slug)}`);
-    res.json({ ...stream.toJSON(), hlsUrl: vmControl.hlsUrl(slug) });
+    res.json({ ...stream.toJSON(), hlsUrl: vmControl.hlsUrl(slug), hlsUrls: vmControl.hlsUrls(slug) });
   } catch (err) {
     console.error('[CloudStream] Failed to start ingest:', err.message);
     res.status(500).json({ status: 'error', message: err.message });
