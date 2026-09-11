@@ -184,6 +184,19 @@
             <button onclick="toggleNewCloudStreamForm()" class="text-sky-400 hover:text-sky-300 text-xs font-medium">+ New Source</button>
           </div>
           <p class="text-xs text-slate-500 mb-3">Ingests a stream on the cloud VM and republishes it as HLS via the VM's MediaMTX. Accepts udp://, srt://, rtmp(s)://, rtsp://, or http(s)://.</p>
+
+          <!-- Kept outside #cloud-stream-list on purpose: that list is fully
+               rebuilt every 15s poll, which would tear down and restart any
+               <video> living inside it. This block survives that. -->
+          <div id="cloud-preview-block" class="hidden relative w-full aspect-video bg-black rounded-lg overflow-hidden border-2 border-violet-500/50 shadow-inner mb-3">
+            <video id="cloud-preview" class="w-full h-full" controls autoplay muted playsinline></video>
+            <div id="cloud-preview-offline" class="absolute inset-0 flex items-center justify-center text-slate-500 text-sm bg-black/60">Waiting for stream...</div>
+            <div class="absolute top-2 left-2 right-2 flex items-center justify-between gap-2">
+              <span id="cloud-preview-label" class="bg-black/70 text-slate-200 text-xs font-medium px-2 py-1 rounded"></span>
+              <button onclick="closeCloudPreview()" class="bg-black/70 hover:bg-black/90 text-slate-200 text-xs font-medium px-2 py-1 rounded transition">Close</button>
+            </div>
+          </div>
+
           <div id="cloud-stream-list" class="flex flex-col gap-2 mb-3">
             <span class="text-slate-500 text-sm">Loading...</span>
           </div>
@@ -1054,10 +1067,12 @@
             ${s.hlsUrls?.tailscale ? `<div class="text-xs text-violet-400 font-mono break-all select-all mt-0.5"><span class="text-slate-500">Tailscale:</span> ${s.hlsUrls.tailscale}</div>` : ''}
           </div>
           <div class="flex gap-2 shrink-0">
+            <button class="btn-preview bg-violet-600 hover:bg-violet-700 text-white px-3 py-1.5 rounded-lg text-xs font-medium transition">Preview</button>
             <button class="btn-toggle bg-amber-600 hover:bg-amber-700 text-white px-3 py-1.5 rounded-lg text-xs font-medium transition">${s.running === false ? 'Start' : 'Stop'}</button>
             <button class="btn-delete text-red-400 hover:text-red-300 text-xs font-medium">Delete</button>
           </div>`;
-        const [toggleBtn, deleteBtn] = row.querySelectorAll('button');
+        const [previewBtn, toggleBtn, deleteBtn] = row.querySelectorAll('button');
+        previewBtn.onclick = () => previewCloudStream(s);
         toggleBtn.onclick = () => toggleCloudStream(s, toggleBtn);
         deleteBtn.onclick = () => deleteCloudStream(s.id, deleteBtn);
         container.appendChild(row);
@@ -1142,26 +1157,84 @@
     const offlineOverlay = document.getElementById('preview-offline');
     let hls = null;
 
+    // Attaches hls.js to a <video>, given one or more candidate URLs for the
+    // SAME stream reached over different network paths (e.g. a LAN address
+    // and a Tailscale address for the same MediaMTX). On a fatal error it
+    // advances to the next candidate rather than only retrying the one that
+    // just failed - this only helps when the browser running it can actually
+    // reach every candidate itself (an admin's own machine on both networks,
+    // say); it can't make an address reachable to a viewer whose network
+    // genuinely has no route to it. Wraps back to the first candidate after
+    // the last, so if every path is down it keeps retrying instead of giving
+    // up.
+    //
+    // Only touches the hls.js instance it owns, never the <video>'s own
+    // "playing"/"waiting" listeners - those are the caller's to manage, since
+    // a persistent video element (like the main preview below) must register
+    // them exactly once, not once per call. Returns a handle with .destroy().
+    function attachHlsWithFailover(videoEl, urls, onFatalError) {
+      const candidates = (Array.isArray(urls) ? urls : [urls]).filter(Boolean);
+      let index = 0;
+      let inst = null;
+      let retryTimer = null;
+
+      function loadCurrent() {
+        if (inst) inst.loadSource(candidates[index]);
+        else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) videoEl.src = candidates[index];
+      }
+
+      if (window.Hls && Hls.isSupported()) {
+        inst = new Hls({ liveSyncDurationCount: 3 });
+        inst.attachMedia(videoEl);
+        inst.on(Hls.Events.ERROR, (_evt, data) => {
+          if (!data.fatal) return;
+          onFatalError?.();
+          index = (index + 1) % candidates.length;
+          clearTimeout(retryTimer);
+          retryTimer = setTimeout(loadCurrent, 4000);
+        });
+      } else if (!videoEl.canPlayType('application/vnd.apple.mpegurl')) {
+        onFatalError?.('HLS playback not supported in this browser.');
+      }
+      loadCurrent();
+
+      return {
+        destroy() {
+          clearTimeout(retryTimer);
+          if (inst) inst.destroy();
+        }
+      };
+    }
+
     function startPreview(hlsUrl) {
       if (hls) hls.destroy();
-      if (window.Hls && Hls.isSupported()) {
-        hls = new Hls({ liveSyncDurationCount: 3 });
-        hls.loadSource(hlsUrl);
-        hls.attachMedia(video);
-        hls.on(Hls.Events.ERROR, (_evt, data) => {
-          if (data.fatal) {
-            offlineOverlay.classList.remove('hidden');
-            setTimeout(() => hls.loadSource(hlsUrl), 4000);
-          }
-        });
-      } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-        video.src = hlsUrl;
-      } else {
-        offlineOverlay.textContent = 'HLS playback not supported in this browser.';
-      }
+      hls = attachHlsWithFailover(video, hlsUrl, () => offlineOverlay.classList.remove('hidden'));
     }
     video.addEventListener('playing', () => offlineOverlay.classList.add('hidden'));
     video.addEventListener('waiting', () => offlineOverlay.classList.remove('hidden'));
+
+    // --- Cloud Stream preview (separate <video>, see #cloud-preview-block) ---
+    const cloudVideo = document.getElementById('cloud-preview');
+    const cloudOfflineOverlay = document.getElementById('cloud-preview-offline');
+    let cloudHls = null;
+    cloudVideo.addEventListener('playing', () => cloudOfflineOverlay.classList.add('hidden'));
+    cloudVideo.addEventListener('waiting', () => cloudOfflineOverlay.classList.remove('hidden'));
+
+    function previewCloudStream(s) {
+      if (cloudHls) cloudHls.destroy();
+      const urls = [s.hlsUrls?.lan ?? s.hlsUrl, s.hlsUrls?.tailscale].filter(Boolean);
+      document.getElementById('cloud-preview-block').classList.remove('hidden');
+      document.getElementById('cloud-preview-label').textContent =
+        urls.length > 1 ? `${s.name} (LAN + Tailscale failover)` : s.name;
+      cloudOfflineOverlay.classList.remove('hidden');
+      cloudHls = attachHlsWithFailover(cloudVideo, urls, () => cloudOfflineOverlay.classList.remove('hidden'));
+    }
+
+    function closeCloudPreview() {
+      if (cloudHls) { cloudHls.destroy(); cloudHls = null; }
+      cloudVideo.removeAttribute('src');
+      document.getElementById('cloud-preview-block').classList.add('hidden');
+    }
 
     async function refreshAll() {
       await loadChannels();
