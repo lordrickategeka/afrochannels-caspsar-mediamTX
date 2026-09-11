@@ -189,8 +189,8 @@
           </div>
 
           <div id="new-cloud-stream-form" class="hidden border-t border-slate-700/50 pt-4 mt-2 space-y-2">
-            <input type="text" id="cs-name" placeholder="Stream name" class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-slate-100 text-sm focus:outline-none focus:border-sky-500 transition">
-            <input type="text" id="cs-source-url" placeholder="udp://239.1.1.1:1234, srt://host:port, rtmp://host/app, rtsp://host/path, https://host/stream.m3u8 ..." class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-slate-100 text-sm font-mono focus:outline-none focus:border-sky-500 transition">
+            <input type="text" id="cs-name" placeholder="Stream name" required class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-slate-100 text-sm focus:outline-none focus:border-sky-500 transition">
+            <input type="text" id="cs-source-url" placeholder="udp://239.1.1.1:1234, srt://host:port, rtmp://host/app, rtsp://host/path, https://host/stream.m3u8 ..." required class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-slate-100 text-sm font-mono focus:outline-none focus:border-sky-500 transition">
             <input type="number" id="cs-program" min="0" placeholder="Program # (only for a udp:// multicast that bundles several TV services - leave blank otherwise)" class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-slate-100 text-sm font-mono focus:outline-none focus:border-sky-500 transition">
             <div class="flex gap-2 pt-2">
               <button onclick="createCloudStream(this)" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-medium flex-1 transition">Create</button>
@@ -1068,12 +1068,18 @@
     }
 
     async function createCloudStream(btn) {
-      const name = document.getElementById('cs-name').value;
-      const sourceUrl = document.getElementById('cs-source-url').value;
+      const nameInput = document.getElementById('cs-name');
+      const sourceUrlInput = document.getElementById('cs-source-url');
+      const name = nameInput.value;
+      const sourceUrl = sourceUrlInput.value;
       const programRaw = document.getElementById('cs-program').value;
       const program = programRaw === '' ? undefined : Number(programRaw);
-      if (!name) return log('Stream name is required', 'error');
-      if (!sourceUrl) return log('Source URL is required', 'error');
+      // The button is a plain onclick, not a <form> submit, so the "required"
+      // attribute on these inputs does nothing on its own - reportValidity()
+      // is what actually triggers the browser's native highlight + tooltip.
+      // Checked in this order so the first empty field is what gets focused.
+      if (!nameInput.reportValidity()) return;
+      if (!sourceUrlInput.reportValidity()) return;
 
       await withLoading(btn, async () => {
         try {
