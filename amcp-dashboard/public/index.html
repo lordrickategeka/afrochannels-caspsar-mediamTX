@@ -191,6 +191,7 @@
           <div id="new-cloud-stream-form" class="hidden border-t border-slate-700/50 pt-4 mt-2 space-y-2">
             <input type="text" id="cs-name" placeholder="Stream name" class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-slate-100 text-sm focus:outline-none focus:border-sky-500 transition">
             <input type="text" id="cs-source-url" placeholder="udp://239.1.1.1:1234, srt://host:port, rtmp://host/app, rtsp://host/path, https://host/stream.m3u8 ..." class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-slate-100 text-sm font-mono focus:outline-none focus:border-sky-500 transition">
+            <input type="number" id="cs-program" min="0" placeholder="Program # (only for a udp:// multicast that bundles several TV services - leave blank otherwise)" class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-slate-100 text-sm font-mono focus:outline-none focus:border-sky-500 transition">
             <div class="flex gap-2 pt-2">
               <button onclick="createCloudStream(this)" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-medium flex-1 transition">Create</button>
               <button onclick="toggleNewCloudStreamForm()" class="bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-lg text-sm font-medium flex-1 transition">Cancel</button>
@@ -1069,15 +1070,18 @@
     async function createCloudStream(btn) {
       const name = document.getElementById('cs-name').value;
       const sourceUrl = document.getElementById('cs-source-url').value;
+      const programRaw = document.getElementById('cs-program').value;
+      const program = programRaw === '' ? undefined : Number(programRaw);
       if (!name) return log('Stream name is required', 'error');
       if (!sourceUrl) return log('Source URL is required', 'error');
 
       await withLoading(btn, async () => {
         try {
-          const stream = await api('/api/cloud-streams', { method: 'POST', body: JSON.stringify({ name, sourceUrl }) });
+          const stream = await api('/api/cloud-streams', { method: 'POST', body: JSON.stringify({ name, sourceUrl, program }) });
           log(`Cloud stream "${name}" started - HLS: ${stream.hlsUrl}`, 'success');
           document.getElementById('cs-name').value = '';
           document.getElementById('cs-source-url').value = '';
+          document.getElementById('cs-program').value = '';
           toggleNewCloudStreamForm();
         } catch (err) { log(`Error: ${err.message}`, 'error'); }
         await loadCloudStreams();

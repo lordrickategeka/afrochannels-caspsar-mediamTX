@@ -747,17 +747,19 @@ app.get('/api/cloud-streams', async (req, res) => {
 
 /**
  * POST /api/cloud-streams
- * Body: { name, sourceUrl } - sourceUrl may be udp://, srt://, rtmp(s)://,
- * rtsp://, or http(s)://.
+ * Body: { name, sourceUrl, program? } - sourceUrl may be udp://, srt://,
+ * rtmp(s)://, rtsp://, or http(s)://. "program" is optional and only
+ * meaningful for a udp:// source that bundles several TV services into one
+ * multicast address - see the comment on vm-control.js's startIngest().
  * Starts the VM-side ingest first and only saves the record if that
  * succeeds, so there's never a saved stream with no actual container behind it.
  */
 app.post('/api/cloud-streams', async (req, res) => {
-  const { name, sourceUrl } = req.body || {};
+  const { name, sourceUrl, program } = req.body || {};
   if (!name || !sourceUrl) return res.status(400).json({ status: 'error', message: '"name" and "sourceUrl" are required' });
   try {
     const slug = await generateCloudSlug(name);
-    await vmControl.startIngest(slug, sourceUrl);
+    await vmControl.startIngest(slug, sourceUrl, program);
     const stream = await CloudStream.create({ name, slug, sourceUrl });
     console.log(`[CloudStream] Started ingest "${name}" (${slug}) -> ${vmControl.hlsUrl(slug)}`);
     res.json({ ...stream.toJSON(), hlsUrl: vmControl.hlsUrl(slug) });

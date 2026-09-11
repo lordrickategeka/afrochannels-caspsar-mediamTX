@@ -59,6 +59,19 @@ function inputFlags(sourceUrl) {
   return flags.join(' ');
 }
 
+// A UDP input that goes quiet makes ffmpeg block forever rather than exit -
+// verified on this VM: a container froze mid-stream for hours because
+// "restart: unless-stopped" only helps once ffmpeg actually exits. Appending
+// "timeout" (microseconds) to the URL if the caller didn't already set one
+// makes ffmpeg error out after 10s of silence instead, so Docker's restart
+// policy can recover it once the source comes back.
+function withUdpTimeout(sourceUrl) {
+  if (!sourceUrl.startsWith('udp://') || /[?&]timeout=/.test(sourceUrl)) {
+    return sourceUrl;
+  }
+  return sourceUrl + (sourceUrl.includes('?') ? '&' : '?') + 'timeout=10000000';
+}
+
 function assertSafeSlug(slug) {
   if (typeof slug !== 'string' || !SAFE_SLUG_RE.test(slug)) {
     throw new Error(`Invalid stream slug "${slug}"`);
@@ -112,10 +125,25 @@ function hlsUrl(slug) {
  * RTMP path "live/<slug>". Throws on a malformed source URL, unreachable VM,
  * or a failing docker command - callers should not create a CloudStream
  * record unless this resolves successfully.
+ *
+ * program (optional): for a udp:// source that is a multi-program transport
+ * stream - one multicast address carrying several TV services at once, as
+ * this deployment's headend does - selects which one via "-map 0:p:N".
+ * Inspect a source first with:
+ *   ffprobe -show_programs -of compact=p=0 "<the source URL>"
+ * and read each program's "tag:service_name". Without it, ffmpeg falls back
+ * to its own stream selection, which is not guaranteed to pair the video and
+ * audio of the same service. Not persisted anywhere - like sourceUrl, it's
+ * baked into the container's command at creation time; resumeIngest() only
+ * starts/stops that same container, it never needs this again.
  */
-async function startIngest(slug, sourceUrl) {
+async function startIngest(slug, sourceUrl, program) {
   assertSafeSlug(slug);
   assertSafeSourceUrl(sourceUrl);
+  if (program !== undefined && !/^\d+$/.test(String(program))) {
+    throw new Error('program must be a non-negative integer');
+  }
+  sourceUrl = withUdpTimeout(sourceUrl);
   const name = containerName(slug);
   // Credentials go in the query string, NOT as user:pass@host. MediaMTX reads
   // RTMP credentials only from the "user"/"pass" query parameters; the userinfo
@@ -129,6 +157,20 @@ async function startIngest(slug, sourceUrl) {
     + `?user=${encodeURIComponent(MEDIAMTX_PUBLISH_USER)}`
     + `&pass=${encodeURIComponent(MEDIAMTX_PUBLISH_PASSWORD)}`;
 
+  // udp:// re-encodes video rather than copying it: this deployment's
+  // headend never emits an H.264 IDR frame at all (measured over a 35s
+  // window - SPS every ~2.3s, PPS every frame, zero IDR - gradual/intra
+  // refresh instead). "-c:v copy" waits forever for a keyframe that never
+  // arrives, so ffmpeg produces audio only, forever. libx264 with a fixed
+  // GOP inserts real IDRs. Other schemes (srt/rtmp/rtsp/http) aren't known to
+  // have this problem and copying is cheaper, so they keep the original
+  // stream-copy path.
+  const isUdp = sourceUrl.startsWith('udp://');
+  const videoArgs = isUdp
+    ? '-c:v libx264 -preset veryfast -tune zerolatency -g 50 -keyint_min 50 -sc_threshold 0 -pix_fmt yuv420p'
+    : '-c:v copy';
+  const mapArgs = program !== undefined ? `-map 0:p:${program}` : '';
+
   return withConnection(async (ssh) => {
     // "docker run --name" fails outright if a container by that name already
     // exists, even a stopped one - clear the way first (e.g. a previous
@@ -141,9 +183,11 @@ async function startIngest(slug, sourceUrl) {
       'linuxserver/ffmpeg',
       inputFlags(sourceUrl),
       `-i '${sourceUrl}'`,
-      '-c:v copy -c:a aac -f flv',
+      mapArgs,
+      videoArgs,
+      '-c:a aac -f flv',
       `'${rtmpUrl}'`
-    ].join(' ');
+    ].filter(Boolean).join(' ');
     const result = await ssh.execCommand(cmd);
     if (result.code !== 0) {
       throw new Error(result.stderr || `docker run exited with code ${result.code}`);
