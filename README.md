@@ -74,7 +74,16 @@ existing `.env` or database. It refuses to run while the dashboard is up, so run
 
 After setup:
 - **Cloud Streams**: fill in the `VM_*` and `MEDIAMTX_*` values in
-  `amcp-dashboard/.env` (see the table below) if you use that feature.
+  `amcp-dashboard/.env` (see the table below) if this dashboard should manage the ingest
+  VM. If the VM runs its own copy of the dashboard, that copy owns Cloud Streams. Leave
+  `VM_HOST` empty here and the tab is hidden, so two dashboards never manage the same
+  ingest containers.
+- **Using VM streams as channel sources**: the VM's MediaMTX lets anyone read over RTMP.
+  Add `rtmp://<vm-ip>:1935/live/<stream-slug>` as a channel source; it has less delay than
+  the HLS link.
+
+On the ingest VM itself (Linux), the dashboard detects that CasparCG can't run and shows
+only Cloud Streams, Health and System & Logs.
 - **Firewall**: on first start, allow **Node.js** and **MediaMTX** through Windows
   Firewall. That lets other machines reach the dashboard (port 3005) and the HLS links
   (port 8888).

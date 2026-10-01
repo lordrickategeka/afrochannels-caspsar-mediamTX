@@ -577,15 +577,17 @@
     // The video monitor and status bar live outside these tabs (sticky right
     // column in the HTML) so they stay visible no matter which tab is open.
     const MAIN_TABS = ['channels', 'graphics', 'cloud', 'health', 'system'];
-    const PLAYOUT_TABS = ['channels', 'graphics'];
-    // Set from /api/status. False when the dashboard runs on a host without
-    // CasparCG (the Linux ingest VM) - the playout half is hidden there.
+    // Set from /api/status. playoutSupported is false where there's no
+    // CasparCG (the Linux ingest VM); cloudStreamsEnabled is false where no
+    // ingest VM is configured (a playout PC whose VM has its own dashboard).
     let playoutSupported = true;
+    let cloudStreamsEnabled = true;
+    const hiddenTabs = new Set();
 
     function setMainTab(name) {
-      if (!playoutSupported && PLAYOUT_TABS.includes(name)) name = 'cloud';
+      if (hiddenTabs.has(name)) name = MAIN_TABS.find((t) => !hiddenTabs.has(t));
       for (const tab of MAIN_TABS) {
-        const hiddenTab = !playoutSupported && PLAYOUT_TABS.includes(tab);
+        const hiddenTab = hiddenTabs.has(tab);
         document.getElementById(`tab-panel-${tab}`).className = tab === name ? 'flex flex-col gap-6' : 'hidden';
         document.getElementById(`tab-btn-${tab}`).className =
           `px-4 py-2 rounded-lg text-sm font-medium transition whitespace-nowrap ${hiddenTab ? 'hidden' : ''} ${tab === name ? 'bg-sky-600 text-white' : 'bg-slate-800 text-slate-400 hover:text-slate-200'}`;
@@ -600,6 +602,7 @@
     // time /api/status reports playoutSupported: false.
     function applyPlayoutMode(supported) {
       playoutSupported = supported;
+      for (const tab of ['channels', 'graphics']) supported ? hiddenTabs.delete(tab) : hiddenTabs.add(tab);
       const toggle = (node) => node?.classList.toggle('hidden', !supported);
       toggle(document.getElementById('channel-picker'));
       document.getElementById('playout-off-banner').classList.toggle('hidden', supported);
@@ -613,8 +616,21 @@
         stopPreview();
         previewUrl = null;
       }
+      reapplyCurrentTab();
+    }
+
+    // Hides the Cloud Streams tab and the Cloud VM row when this dashboard
+    // has no ingest VM configured. Called once, from pollStatus.
+    function applyCloudStreamsMode(enabled) {
+      cloudStreamsEnabled = enabled;
+      enabled ? hiddenTabs.delete('cloud') : hiddenTabs.add('cloud');
+      document.getElementById('dot-cloud-vm')?.closest('.justify-between')?.classList.toggle('hidden', !enabled);
+      reapplyCurrentTab();
+    }
+
+    function reapplyCurrentTab() {
       const current = MAIN_TABS.find((t) => !document.getElementById(`tab-panel-${t}`).classList.contains('hidden'));
-      setMainTab(current || 'cloud');
+      setMainTab(current || MAIN_TABS[0]);
     }
 
     function log(msg, level = 'info') {
@@ -1253,6 +1269,7 @@
     // (it has no slugs to check, so it skips contacting the VM entirely) -
     // this hits the VM directly regardless of how many streams exist.
     async function pollCloudVmStatus() {
+      if (!cloudStreamsEnabled) return;
       try {
         const { reachable } = await api('/api/cloud-streams/vm-status');
         document.getElementById('dot-cloud-vm').className = `w-2.5 h-2.5 rounded-full ${reachable ? 'bg-emerald-500' : 'bg-red-500'}`;
@@ -1264,6 +1281,7 @@
     }
 
     async function loadCloudStreams() {
+      if (!cloudStreamsEnabled) return;
       try {
         cloudStreams = await api('/api/cloud-streams');
       } catch (err) {
@@ -1365,6 +1383,7 @@
       try {
         const s = await api('/api/status');
         if (s.playoutSupported === false && playoutSupported) applyPlayoutMode(false);
+        if (s.cloudStreamsEnabled === false && cloudStreamsEnabled) applyCloudStreamsMode(false);
         const onAirIds = Object.keys(s.channels || {}).map(Number);
         document.getElementById('dot-caspar').className = `w-2.5 h-2.5 rounded-full ${s.casparConnected ? 'bg-emerald-500' : 'bg-red-500'}`;
         document.getElementById('status-onair-count').textContent = String(onAirIds.length);

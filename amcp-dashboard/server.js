@@ -47,6 +47,16 @@ function requirePlayout(req, res, next) {
   res.status(501).json({ status: 'error', message: PLAYOUT_UNAVAILABLE_MESSAGE });
 }
 
+// Cloud Streams need an ingest VM to drive. A playout PC whose VM runs its
+// own dashboard (which then owns the Cloud Streams) leaves VM_HOST empty, so
+// two dashboards never manage the same ingest containers.
+const CLOUD_STREAMS_ENABLED = Boolean(process.env.VM_HOST);
+
+function requireCloudStreams(req, res, next) {
+  if (CLOUD_STREAMS_ENABLED) return next();
+  res.status(501).json({ status: 'error', message: 'Cloud Streams are off on this dashboard - VM_HOST is not set in .env' });
+}
+
 if (!process.env.SESSION_SECRET) {
   console.error('[Config] SESSION_SECRET must be set in .env - see .env.example');
   process.exit(1);
@@ -708,7 +718,7 @@ app.get('/api/status', (req, res) => {
       activeGraphics: rt.activeGraphics
     };
   }
-  res.json({ playoutSupported: PLAYOUT_SUPPORTED, casparConnected: state.casparConnected, lastError: state.lastError, channels });
+  res.json({ playoutSupported: PLAYOUT_SUPPORTED, cloudStreamsEnabled: CLOUD_STREAMS_ENABLED, casparConnected: state.casparConnected, lastError: state.lastError, channels });
 });
 
 /**
@@ -884,7 +894,7 @@ async function generateCloudSlug(name) {
  * wouldn't actually confuse "vm-status" with an :id segment either way since
  * this path has no trailing segment for those routes to match against.
  */
-app.get('/api/cloud-streams/vm-status', async (req, res) => {
+app.get('/api/cloud-streams/vm-status', requireCloudStreams, async (req, res) => {
   const reachable = await vmControl.isReachable();
   res.json({ reachable });
 });
@@ -896,7 +906,7 @@ app.get('/api/cloud-streams/vm-status', async (req, res) => {
  * stream rather than failing the whole request - the list itself is still
  * useful even when the VM is temporarily unreachable.
  */
-app.get('/api/cloud-streams', async (req, res) => {
+app.get('/api/cloud-streams', requireCloudStreams, async (req, res) => {
   const streams = await CloudStream.findAll({ order: [['id', 'ASC']] });
   let statusBySlug = {};
   try {
@@ -924,7 +934,7 @@ app.get('/api/cloud-streams', async (req, res) => {
  * Starts the VM-side ingest first and only saves the record if that
  * succeeds, so there's never a saved stream with no actual container behind it.
  */
-app.post('/api/cloud-streams', async (req, res) => {
+app.post('/api/cloud-streams', requireCloudStreams, async (req, res) => {
   const { name, sourceUrl, program } = req.body || {};
   if (!name || !sourceUrl) return res.status(400).json({ status: 'error', message: '"name" and "sourceUrl" are required' });
   try {
@@ -942,7 +952,7 @@ app.post('/api/cloud-streams', async (req, res) => {
 /**
  * POST /api/cloud-streams/:id/stop
  */
-app.post('/api/cloud-streams/:id/stop', async (req, res) => {
+app.post('/api/cloud-streams/:id/stop', requireCloudStreams, async (req, res) => {
   const stream = await CloudStream.findByPk(req.params.id);
   if (!stream) return res.status(404).json({ status: 'error', message: 'Stream not found' });
   try {
@@ -958,7 +968,7 @@ app.post('/api/cloud-streams/:id/stop', async (req, res) => {
  * Resumes a previously-stopped ingest container (does not recreate it - use
  * DELETE then re-create the stream if the UDP source itself changed).
  */
-app.post('/api/cloud-streams/:id/start', async (req, res) => {
+app.post('/api/cloud-streams/:id/start', requireCloudStreams, async (req, res) => {
   const stream = await CloudStream.findByPk(req.params.id);
   if (!stream) return res.status(404).json({ status: 'error', message: 'Stream not found' });
   try {
@@ -976,7 +986,7 @@ app.post('/api/cloud-streams/:id/start', async (req, res) => {
  * their list; a container orphaned on an unreachable VM needs manual cleanup
  * either way, and it can't stay in a list with no way to remove it.
  */
-app.delete('/api/cloud-streams/:id', async (req, res) => {
+app.delete('/api/cloud-streams/:id', requireCloudStreams, async (req, res) => {
   const stream = await CloudStream.findByPk(req.params.id);
   if (!stream) return res.status(404).json({ status: 'error', message: 'Stream not found' });
   try {
