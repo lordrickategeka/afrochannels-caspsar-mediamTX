@@ -10,6 +10,7 @@ const { CasparCG } = require('casparcg-connection');
 const { sequelize, User, Channel, Source, BrandingPreset, CloudStream } = require('./db/models');
 const procManager = require('./process-manager');
 const vmControl = require('./vm-control');
+const health = require('./health-monitor');
 
 // Mirror every console.log/error into the same log stream as the managed
 // CasparCG/MediaMTX processes, so the browser's log console is the single
@@ -97,15 +98,53 @@ const caspar = new CasparCG({
 // operators having to infer it from a single overwritten log line.
 const state = {
   casparConnected: false,
-  activeChannelId: null,
-  activeChannelName: null,
-  activeSourceId: null,
-  activeSourceLabel: null,
-  streamConsumerActive: false,
-  streamConsumerTarget: null, // which rtmpTarget the live consumer is pointed at
-  activeGraphics: {}, // populated below once TEMPLATES is defined
   lastError: null
 };
+
+// Every channel that is on air, keyed by Channel id. Several can be on air at
+// once, each on its own CasparCG channel number (so its own layers, graphics
+// and RTMP consumer) - an entry here is created by activation and removed by
+// taking the channel off air, and the DB's Channel.isActive mirrors it so the
+// set survives a dashboard restart.
+const onAir = new Map();
+
+function newRuntime(channel) {
+  return {
+    channelId: channel.id,
+    name: channel.name,
+    // Locked in at activation: changing it on the Channel record while on air
+    // is refused (PUT /api/channels/:id), since the layers/consumer already
+    // live on this number.
+    casparChannelNumber: channel.casparChannelNumber,
+    sourceId: null,
+    sourceLabel: null,
+    streamConsumerActive: false,
+    streamConsumerTarget: null, // which rtmpTarget the live consumer is pointed at
+    activeGraphics: Object.fromEntries(Object.keys(TEMPLATES).map((k) => [k, false])),
+    watchdog: { lastPlaybackTime: null, stallTicks: 0, pausedUntil: 0, failoverStartSourceId: null }
+  };
+}
+
+function httpError(status, message) {
+  const err = new Error(message);
+  err.status = status;
+  return err;
+}
+
+/**
+ * Resolves which on-air channel a graphics/clear request targets. Clients
+ * that predate multi-channel send no channelId - that still works while
+ * exactly one channel is on air, and is ambiguous otherwise.
+ */
+function resolveOnAir(channelId) {
+  if (channelId !== undefined && channelId !== null) {
+    const rt = onAir.get(Number(channelId));
+    if (!rt) throw httpError(400, 'That channel is not on air - take it live first');
+    return rt;
+  }
+  if (onAir.size === 1) return [...onAir.values()][0];
+  throw httpError(400, onAir.size === 0 ? 'No channel is on air' : '"channelId" is required when more than one channel is on air');
+}
 
 caspar.on('connect', async () => {
   state.casparConnected = true;
@@ -121,24 +160,29 @@ caspar.on('connect', async () => {
   // didn't initiate itself - observed live: CasparCG restarted a second,
   // unexpected time during testing, and a delay-based recovery in the
   // restart handler alone missed it.
-  state.streamConsumerActive = false;
-  state.streamConsumerTarget = null;
-  resetFailoverTracking();
-  if (state.activeSourceId) {
-    try {
-      await playSourceById(state.activeSourceId);
-      console.log(`[AMCP] Re-established playout after (re)connect: source ${state.activeSourceId}`);
-    } catch (err) {
-      console.error('[AMCP] Failed to re-establish playout after reconnect:', err.message);
+  for (const rt of [...onAir.values()]) {
+    rt.streamConsumerActive = false;
+    rt.streamConsumerTarget = null;
+    resetFailoverTracking(rt);
+    if (rt.sourceId) {
+      try {
+        await playSourceById(rt.sourceId);
+        console.log(`[AMCP] Re-established playout on "${rt.name}" after (re)connect: source ${rt.sourceId}`);
+      } catch (err) {
+        console.error(`[AMCP] Failed to re-establish playout on "${rt.name}" after reconnect:`, err.message);
+      }
     }
-  }
-  if (state.activeChannelId) {
-    for (const key of Object.keys(state.activeGraphics)) state.activeGraphics[key] = false;
-    await applyDefaultPresets(state.activeChannelId);
+    for (const key of Object.keys(rt.activeGraphics)) rt.activeGraphics[key] = false;
+    await applyDefaultPresets(rt.channelId);
   }
 });
 
 caspar.on('disconnect', () => {
+  // Fires repeatedly while reconnect attempts keep failing - only the first
+  // drop is an incident.
+  if (state.casparConnected && onAir.size > 0) {
+    health.recordIncident({ type: 'casparcg-disconnect', message: `Lost connection to CasparCG with ${onAir.size} channel(s) on air` });
+  }
   state.casparConnected = false;
   console.log('[AMCP] Disconnected from CasparCG Server');
 });
@@ -188,7 +232,6 @@ for (let i = 1; i <= CENSOR_BOX_SLOTS; i++) {
     defaultData: { color: '#000000', position: { xPercent: 40, yPercent: 40 + (i - 1) * 15 }, widthPercent: 15, heightPercent: 15 }
   };
 }
-state.activeGraphics = Object.fromEntries(Object.keys(TEMPLATES).map((k) => [k, false]));
 
 // --- IMAGE UPLOADS ---
 // Uploaded assets (logos etc. for the "image_overlay" template) are saved
@@ -227,8 +270,23 @@ app.post('/api/assets/upload', (req, res) => {
   });
 });
 
-function getActiveChannel() {
-  return Channel.findOne({ where: { isActive: true }, include: [{ model: Source }] });
+/**
+ * Checks CasparCG actually has this channel number configured, so activating
+ * a channel profile beyond what casparcg.config defines fails with a clear
+ * message instead of silently doing nothing (casparcg-connection's command
+ * methods resolve once the command is *sent*; CasparCG's own error reply only
+ * arrives on the returned request promise). Skipped while disconnected - the
+ * reconnect handler replays everything once CasparCG is back.
+ */
+async function assertCasparChannelExists(channelNo) {
+  if (!state.casparConnected) return;
+  const { error, request } = await caspar.sendCustom({ command: `INFO ${channelNo}` });
+  if (error) throw error;
+  try {
+    await request;
+  } catch {
+    throw httpError(400, `CasparCG has no channel ${channelNo} - add another <channel> to casparcg.config (one per simultaneous on-air channel), or pick a different CasparCG channel number`);
+  }
 }
 
 /**
@@ -238,16 +296,16 @@ function getActiveChannel() {
  * instead of needing to be manually re-applied every time.
  */
 async function applyDefaultPresets(channelId) {
+  const rt = onAir.get(channelId);
+  if (!rt) return;
   const defaults = await BrandingPreset.findAll({ where: { channelId, isDefault: true } });
-  const channel = await Channel.findByPk(channelId);
-  if (!channel) return;
   for (const preset of defaults) {
     const template = TEMPLATES[preset.template];
     if (!template) continue;
     try {
-      await caspar.cgAdd({ channel: channel.casparChannelNumber, layer: template.layer, template: template.path, playOnLoad: true, data: preset.data });
-      state.activeGraphics[preset.template] = true;
-      console.log(`[Preset] Default "${preset.name}" (${preset.template}) applied`);
+      await caspar.cgAdd({ channel: rt.casparChannelNumber, layer: template.layer, template: template.path, playOnLoad: true, data: preset.data });
+      rt.activeGraphics[preset.template] = true;
+      console.log(`[Preset] Default "${preset.name}" (${preset.template}) applied on "${rt.name}"`);
     } catch (err) {
       console.error(`[Preset] Failed to apply default "${preset.name}":`, err.message);
     }
@@ -261,23 +319,25 @@ async function applyDefaultPresets(channelId) {
  */
 async function playSourceById(sourceId) {
   const source = await Source.findByPk(sourceId, { include: [Channel] });
-  if (!source) throw new Error(`Source ${sourceId} not found`);
+  if (!source) throw httpError(404, `Source ${sourceId} not found`);
   const channel = source.Channel;
-  const channelNo = channel.casparChannelNumber;
+  const rt = onAir.get(channel.id);
+  if (!rt) throw httpError(400, `Channel "${channel.name}" is not on air - take it live first`);
+  const channelNo = rt.casparChannelNumber;
 
   await caspar.play({ channel: channelNo, layer: 1, clip: source.url });
-  state.activeSourceId = source.id;
-  state.activeSourceLabel = source.label;
+  rt.sourceId = source.id;
+  rt.sourceLabel = source.label;
 
   // The consumer captures the channel's output continuously, so it only needs
-  // to be (re)created when there isn't one yet, or when the active channel's
-  // RTMP target has changed (a channel-profile switch).
-  if (state.streamConsumerActive && state.streamConsumerTarget === channel.rtmpTarget) {
-    console.log(`[Stream] Active Feed: ${source.url}`);
+  // to be (re)created when there isn't one yet, or when the channel's RTMP
+  // target has been edited since it was attached.
+  if (rt.streamConsumerActive && rt.streamConsumerTarget === channel.rtmpTarget) {
+    console.log(`[Stream] "${rt.name}" active feed: ${source.url}`);
     return source;
   }
 
-  if (state.streamConsumerActive) {
+  if (rt.streamConsumerActive) {
     try {
       await caspar.sendCustom({ command: `REMOVE ${channelNo}-${STREAM_CONSUMER_INDEX}` });
     } catch (err) {
@@ -316,11 +376,33 @@ async function playSourceById(sourceId) {
     command: `ADD ${channelNo}-${STREAM_CONSUMER_INDEX} STREAM "${channel.rtmpTarget}" -codec:v libx264 -preset:v superfast -tune:v zerolatency -filter:v format=yuv420p -bf:v 0 -g:v 50 -b:v 4000k -codec:a aac -b:a 128k -filter:a pan=stereo|c0=c0|c1=c1 -format flv`
   });
 
-  state.streamConsumerActive = true;
-  state.streamConsumerTarget = channel.rtmpTarget;
-  console.log(`[Stream] Active Feed: ${source.url}`);
-  console.log(`[Output] Pushing RTMP to: ${channel.rtmpTarget}`);
+  rt.streamConsumerActive = true;
+  rt.streamConsumerTarget = channel.rtmpTarget;
+  console.log(`[Stream] "${rt.name}" active feed: ${source.url}`);
+  console.log(`[Output] "${rt.name}" pushing RTMP to: ${channel.rtmpTarget}`);
   return source;
+}
+
+/**
+ * Takes a channel off air: stops everything on its CasparCG channel and
+ * removes its RTMP consumer, so its HLS output goes away too. The runtime
+ * entry is dropped first so the watchdog and reconnect handler stop
+ * touching it immediately.
+ */
+async function takeOffAir(rt) {
+  onAir.delete(rt.channelId);
+  try {
+    await caspar.clear({ channel: rt.casparChannelNumber });
+  } catch (err) {
+    console.error(`[Channel] Failed to clear CasparCG channel ${rt.casparChannelNumber} (continuing anyway):`, err.message);
+  }
+  if (rt.streamConsumerActive) {
+    try {
+      await caspar.sendCustom({ command: `REMOVE ${rt.casparChannelNumber}-${STREAM_CONSUMER_INDEX}` });
+    } catch (err) {
+      console.error('[Stream] Failed to remove STREAM consumer (continuing anyway):', err.message);
+    }
+  }
 }
 
 // --- CHANNEL MANAGEMENT ---
@@ -358,18 +440,36 @@ async function generateRtmpTarget(name) {
   return `rtmp://127.0.0.1:1935/live/${path}`;
 }
 
+// Lowest CasparCG channel number no other profile uses yet, so each new
+// profile gets its own output by default and can go live alongside the rest
+// without an operator having to pick a free number.
+async function nextFreeCasparChannelNumber() {
+  const used = new Set((await Channel.findAll({ attributes: ['casparChannelNumber'] })).map((c) => c.casparChannelNumber));
+  let n = 1;
+  while (used.has(n)) n++;
+  return n;
+}
+
+function isValidCasparChannelNumber(n) {
+  return Number.isInteger(n) && n >= 1;
+}
+
 app.post('/api/channels', async (req, res) => {
   const { name, sources } = req.body || {};
   let { rtmpTarget, casparChannelNumber } = req.body || {};
   if (!name) {
     return res.status(400).json({ status: 'error', message: '"name" is required' });
   }
+  if (casparChannelNumber !== undefined && !isValidCasparChannelNumber(casparChannelNumber)) {
+    return res.status(400).json({ status: 'error', message: '"casparChannelNumber" must be a whole number of 1 or more' });
+  }
   try {
     // rtmpTarget is optional - MediaMTX creates paths on demand for any name
     // (confirmed: no per-path config needed), so a channel only strictly needs
     // its input sources; the output path can just be derived from its name.
     if (!rtmpTarget) rtmpTarget = await generateRtmpTarget(name);
-    const channel = await Channel.create({ name, rtmpTarget, casparChannelNumber: casparChannelNumber || 1 });
+    if (casparChannelNumber === undefined) casparChannelNumber = await nextFreeCasparChannelNumber();
+    const channel = await Channel.create({ name, rtmpTarget, casparChannelNumber });
     if (Array.isArray(sources) && sources.length > 0) {
       await Source.bulkCreate(sources.map((s, i) => ({
         channelId: channel.id,
@@ -393,11 +493,21 @@ app.put('/api/channels/:id', async (req, res) => {
   const channel = await Channel.findByPk(req.params.id);
   if (!channel) return res.status(404).json({ status: 'error', message: 'Channel not found' });
   const { name, rtmpTarget, casparChannelNumber } = req.body || {};
+  if (casparChannelNumber !== undefined) {
+    if (!isValidCasparChannelNumber(casparChannelNumber)) {
+      return res.status(400).json({ status: 'error', message: '"casparChannelNumber" must be a whole number of 1 or more' });
+    }
+    if (onAir.has(channel.id) && casparChannelNumber !== channel.casparChannelNumber) {
+      return res.status(400).json({ status: 'error', message: 'Take the channel off air before changing its CasparCG channel number' });
+    }
+  }
   await channel.update({
     ...(name !== undefined && { name }),
     ...(rtmpTarget !== undefined && { rtmpTarget }),
     ...(casparChannelNumber !== undefined && { casparChannelNumber })
   });
+  const rt = onAir.get(channel.id);
+  if (rt && name !== undefined) rt.name = name;
   res.json(channel);
 });
 
@@ -407,8 +517,8 @@ app.put('/api/channels/:id', async (req, res) => {
 app.delete('/api/channels/:id', async (req, res) => {
   const channel = await Channel.findByPk(req.params.id);
   if (!channel) return res.status(404).json({ status: 'error', message: 'Channel not found' });
-  if (channel.isActive) {
-    return res.status(400).json({ status: 'error', message: 'Cannot delete the active channel - activate a different one first' });
+  if (onAir.has(channel.id)) {
+    return res.status(400).json({ status: 'error', message: 'Cannot delete a channel that is on air - take it off air first' });
   }
   await channel.destroy(); // cascades to Sources/BrandingPresets
   res.json({ status: 'success' });
@@ -416,50 +526,76 @@ app.delete('/api/channels/:id', async (req, res) => {
 
 /**
  * GET /api/channels/active
- * The full active channel record (with sources/presets), for the frontend to
- * build its per-channel controls.
+ * Every on-air channel record (with sources/presets).
  */
 app.get('/api/channels/active', async (req, res) => {
-  const channel = await getActiveChannel();
-  if (!channel) return res.status(404).json({ status: 'error', message: 'No active channel' });
-  const full = await Channel.findByPk(channel.id, { include: [Source, BrandingPreset] });
-  res.json(full);
+  const channels = await Channel.findAll({
+    where: { id: [...onAir.keys()] },
+    include: [Source, BrandingPreset],
+    order: [['id', 'ASC'], [Source, 'priority', 'ASC']]
+  });
+  res.json(channels);
 });
 
 /**
  * POST /api/channels/:id/activate
- * Switches which channel profile is live: clears the previously active
- * channel's output, marks this one active, and auto-plays its top-priority
- * source (attaching/repointing the STREAM consumer as needed).
+ * Takes a channel live on its own CasparCG channel, alongside any others
+ * already on air: auto-plays its top-priority source (attaching the STREAM
+ * consumer) and applies its default presets. Refused if another on-air
+ * channel already occupies the same CasparCG channel number.
  */
 app.post('/api/channels/:id/activate', async (req, res) => {
   try {
     const channel = await Channel.findByPk(req.params.id, { include: [Source] });
     if (!channel) return res.status(404).json({ status: 'error', message: 'Channel not found' });
+    if (onAir.has(channel.id)) return res.json({ status: 'success', channelId: channel.id, alreadyOnAir: true });
 
-    const previouslyActive = await Channel.findOne({ where: { isActive: true } });
-    if (previouslyActive && previouslyActive.id !== channel.id) {
-      await caspar.clear({ channel: previouslyActive.casparChannelNumber });
-      await Channel.update({ isActive: false }, { where: { isActive: true } });
+    const clash = [...onAir.values()].find((rt) => rt.casparChannelNumber === channel.casparChannelNumber);
+    if (clash) {
+      throw httpError(409, `CasparCG channel ${channel.casparChannelNumber} is already in use by "${clash.name}" - take that off air, or give this channel a different CasparCG channel number`);
     }
+    await assertCasparChannelExists(channel.casparChannelNumber);
+
     await channel.update({ isActive: true });
+    const rt = newRuntime(channel);
+    onAir.set(channel.id, rt);
 
-    state.activeChannelId = channel.id;
-    state.activeChannelName = channel.name;
-    state.activeSourceId = null;
-    state.activeSourceLabel = null;
-    for (const key of Object.keys(state.activeGraphics)) state.activeGraphics[key] = false;
-
-    resetFailoverTracking();
+    // Recorded before playing (like startup does) so that if the source is
+    // down right now, the watchdog still owns it and fails over through the
+    // rest of the channel's sources instead of the channel sitting idle.
     const topSource = [...channel.Sources].sort((a, b) => a.priority - b.priority)[0];
-    if (topSource) await playSourceById(topSource.id);
+    if (topSource) {
+      rt.sourceId = topSource.id;
+      rt.sourceLabel = topSource.label;
+      await playSourceById(topSource.id);
+    }
     await applyDefaultPresets(channel.id);
 
-    console.log(`[Channel] Activated "${channel.name}"`);
+    console.log(`[Channel] "${channel.name}" is on air (CasparCG channel ${channel.casparChannelNumber})`);
     res.json({ status: 'success', channelId: channel.id });
   } catch (err) {
     state.lastError = err.message;
     console.error('[Channel Activate Error]', err);
+    res.status(err.status || 500).json({ status: 'error', message: err.message });
+  }
+});
+
+/**
+ * POST /api/channels/:id/deactivate
+ * Takes one channel off air without touching any other on-air channel.
+ */
+app.post('/api/channels/:id/deactivate', async (req, res) => {
+  try {
+    const channel = await Channel.findByPk(req.params.id);
+    if (!channel) return res.status(404).json({ status: 'error', message: 'Channel not found' });
+    const rt = onAir.get(channel.id);
+    if (rt) await takeOffAir(rt);
+    await channel.update({ isActive: false });
+    console.log(`[Channel] "${channel.name}" taken off air`);
+    res.json({ status: 'success', channelId: channel.id });
+  } catch (err) {
+    state.lastError = err.message;
+    console.error('[Channel Deactivate Error]', err);
     res.status(500).json({ status: 'error', message: err.message });
   }
 });
@@ -505,7 +641,7 @@ app.delete('/api/sources/:id', async (req, res) => {
   const source = await Source.findByPk(req.params.id);
   if (!source) return res.status(404).json({ status: 'error', message: 'Source not found' });
 
-  if (Number(source.id) === Number(state.activeSourceId)) {
+  if (Number(source.id) === Number(onAir.get(source.channelId)?.sourceId)) {
     return res.status(400).json({ status: 'error', message: 'Cannot delete the currently playing source - switch to a different one first' });
   }
   const siblingCount = await Source.count({ where: { channelId: source.channelId } });
@@ -527,27 +663,45 @@ app.post('/api/stream/play', async (req, res) => {
   const { sourceId } = req.body || {};
   if (!sourceId) return res.status(400).json({ status: 'error', message: '"sourceId" is required' });
   try {
-    resetFailoverTracking();
-    const source = await playSourceById(sourceId);
+    const source = await Source.findByPk(sourceId);
+    if (!source) throw httpError(404, `Source ${sourceId} not found`);
+    const rt = onAir.get(source.channelId);
+    if (!rt) throw httpError(400, 'That source\'s channel is not on air - take it live first');
+    resetFailoverTracking(rt);
+    await playSourceById(sourceId);
     res.json({ status: 'success', activeStream: source.url, sourceId: source.id, label: source.label });
   } catch (err) {
     state.lastError = err.message;
     console.error('[Stream Error]', err);
-    res.status(500).json({ status: 'error', message: err.message });
+    res.status(err.status || 500).json({ status: 'error', message: err.message });
   }
 });
 
 /**
  * GET /api/status
- * Current server-side state, for the UI status bar.
+ * Current server-side state, for the UI status bar: CasparCG connectivity
+ * plus one entry per on-air channel, keyed by Channel id.
  */
 app.get('/api/status', (req, res) => {
-  res.json(state);
+  const channels = {};
+  for (const [id, rt] of onAir) {
+    channels[id] = {
+      name: rt.name,
+      casparChannelNumber: rt.casparChannelNumber,
+      activeSourceId: rt.sourceId,
+      activeSourceLabel: rt.sourceLabel,
+      streamConsumerActive: rt.streamConsumerActive,
+      streamConsumerTarget: rt.streamConsumerTarget,
+      activeGraphics: rt.activeGraphics
+    };
+  }
+  res.json({ casparConnected: state.casparConnected, lastError: state.lastError, channels });
 });
 
 /**
  * POST /api/graphic/show
- * Body: { "template": "lower_third" | "logo_bug" | "ticker", "data": {...} }
+ * Body: { "channelId": number, "template": "lower_third" | "logo_bug" | "ticker" | ..., "data": {...} }
+ * channelId may be omitted while exactly one channel is on air.
  */
 app.post('/api/graphic/show', async (req, res) => {
   const templateKey = req.body?.template || 'lower_third';
@@ -556,23 +710,23 @@ app.post('/api/graphic/show', async (req, res) => {
   const data = { ...template.defaultData, ...(req.body?.data || {}) };
 
   try {
-    const channel = await getActiveChannel();
-    if (!channel) throw new Error('No active channel');
-    await caspar.cgAdd({ channel: channel.casparChannelNumber, layer: template.layer, template: template.path, playOnLoad: true, data });
+    const rt = resolveOnAir(req.body?.channelId);
+    await caspar.cgAdd({ channel: rt.casparChannelNumber, layer: template.layer, template: template.path, playOnLoad: true, data });
 
-    state.activeGraphics[templateKey] = true;
-    console.log(`[Graphic] "${templateKey}" shown:`, data);
+    rt.activeGraphics[templateKey] = true;
+    console.log(`[Graphic] "${templateKey}" shown on "${rt.name}":`, data);
     res.json({ status: 'success', template: templateKey, data });
   } catch (err) {
     state.lastError = err.message;
     console.error('[Graphic Error]', err);
-    res.status(500).json({ status: 'error', message: err.message });
+    res.status(err.status || 500).json({ status: 'error', message: err.message });
   }
 });
 
 /**
  * POST /api/graphic/hide
- * Body: { "template": "lower_third" | "logo_bug" | "ticker" }
+ * Body: { "channelId": number, "template": "lower_third" | "logo_bug" | "ticker" | ... }
+ * channelId may be omitted while exactly one channel is on air.
  */
 app.post('/api/graphic/hide', async (req, res) => {
   const templateKey = req.body?.template || 'lower_third';
@@ -580,17 +734,16 @@ app.post('/api/graphic/hide', async (req, res) => {
   if (!template) return res.status(400).json({ status: 'error', message: `Unknown template "${templateKey}"` });
 
   try {
-    const channel = await getActiveChannel();
-    if (!channel) throw new Error('No active channel');
-    await caspar.cgStop({ channel: channel.casparChannelNumber, layer: template.layer });
+    const rt = resolveOnAir(req.body?.channelId);
+    await caspar.cgStop({ channel: rt.casparChannelNumber, layer: template.layer });
 
-    state.activeGraphics[templateKey] = false;
-    console.log(`[Graphic] "${templateKey}" hidden`);
+    rt.activeGraphics[templateKey] = false;
+    console.log(`[Graphic] "${templateKey}" hidden on "${rt.name}"`);
     res.json({ status: 'success', template: templateKey, message: 'Graphic removed' });
   } catch (err) {
     state.lastError = err.message;
     console.error('[Graphic Error]', err);
-    res.status(500).json({ status: 'error', message: err.message });
+    res.status(err.status || 500).json({ status: 'error', message: err.message });
   }
 });
 
@@ -645,7 +798,8 @@ app.post('/api/presets/:id/set-default', async (req, res) => {
 
 /**
  * POST /api/presets/:id/apply
- * Shows the preset's saved data on its template's layer, on the active channel.
+ * Shows the preset's saved data on its template's layer, on the channel the
+ * preset belongs to (which must be on air).
  */
 app.post('/api/presets/:id/apply', async (req, res) => {
   const preset = await BrandingPreset.findByPk(req.params.id);
@@ -654,40 +808,39 @@ app.post('/api/presets/:id/apply', async (req, res) => {
   if (!template) return res.status(400).json({ status: 'error', message: `Unknown template "${preset.template}"` });
 
   try {
-    const channel = await getActiveChannel();
-    if (!channel) throw new Error('No active channel');
-    await caspar.cgAdd({ channel: channel.casparChannelNumber, layer: template.layer, template: template.path, playOnLoad: true, data: preset.data });
+    const rt = resolveOnAir(preset.channelId);
+    await caspar.cgAdd({ channel: rt.casparChannelNumber, layer: template.layer, template: template.path, playOnLoad: true, data: preset.data });
 
-    state.activeGraphics[preset.template] = true;
-    console.log(`[Preset] "${preset.name}" (${preset.template}) applied`);
+    rt.activeGraphics[preset.template] = true;
+    console.log(`[Preset] "${preset.name}" (${preset.template}) applied on "${rt.name}"`);
     res.json({ status: 'success', template: preset.template, data: preset.data });
   } catch (err) {
     state.lastError = err.message;
     console.error('[Preset Error]', err);
-    res.status(500).json({ status: 'error', message: err.message });
+    res.status(err.status || 500).json({ status: 'error', message: err.message });
   }
 });
 
 /**
  * POST /api/stream/clear
+ * Body: { "channelId": number } - may be omitted while exactly one channel is on air.
  */
 app.post('/api/stream/clear', async (req, res) => {
   try {
-    const channel = await getActiveChannel();
-    if (!channel) throw new Error('No active channel');
+    const rt = resolveOnAir(req.body?.channelId);
     // CLEAR stops all producers on the channel (the source, the CG graphics) but
     // does not remove consumers, so the STREAM consumer stays attached and keeps
     // pushing to MediaMTX - it'll just be encoding black/silence until something
     // plays again.
-    await caspar.clear({ channel: channel.casparChannelNumber });
-    state.activeSourceId = null;
-    state.activeSourceLabel = null;
-    for (const key of Object.keys(state.activeGraphics)) state.activeGraphics[key] = false;
+    await caspar.clear({ channel: rt.casparChannelNumber });
+    rt.sourceId = null;
+    rt.sourceLabel = null;
+    for (const key of Object.keys(rt.activeGraphics)) rt.activeGraphics[key] = false;
     res.json({ status: 'success', message: 'Channel cleared' });
   } catch (err) {
     state.lastError = err.message;
     console.error('[Clear Error]', err);
-    res.status(500).json({ status: 'error', message: err.message });
+    res.status(err.status || 500).json({ status: 'error', message: err.message });
   }
 });
 
@@ -830,6 +983,15 @@ app.delete('/api/cloud-streams/:id', async (req, res) => {
 // restart. The dashboard itself is the long-running supervisor here and
 // doesn't restart itself - only its two children do.
 
+// Exits the dashboard asked for itself (a restart button, shutdown) aren't
+// incidents; anything else - a crash, an external kill - is.
+const expectedExits = new Set();
+let shuttingDown = false;
+procManager.onExit(({ name, code }) => {
+  if (expectedExits.delete(name) || shuttingDown) return;
+  health.recordIncident({ type: 'process-exit', message: `${name} exited unexpectedly (code ${code})` });
+});
+
 /**
  * POST /api/system/restart
  * Body: { "target": "casparcg" | "mediamtx" } - restarts just that one.
@@ -840,6 +1002,7 @@ app.post('/api/system/restart', async (req, res) => {
     return res.status(400).json({ status: 'error', message: '"target" must be "casparcg" or "mediamtx"' });
   }
   console.log(`[System] Restart requested for ${target}`);
+  if (procManager.isRunning(target)) expectedExits.add(target);
   try {
     if (target === 'casparcg') {
       // Recovery itself happens generically in caspar.on('connect', ...) above,
@@ -854,8 +1017,15 @@ app.post('/api/system/restart', async (req, res) => {
       // is untouched, so just re-establish the consumer against it.
       await procManager.restartProcess('mediamtx');
       await sleep(2000);
-      state.streamConsumerActive = false;
-      if (state.activeSourceId) await playSourceById(state.activeSourceId);
+      for (const rt of [...onAir.values()]) {
+        rt.streamConsumerActive = false;
+        if (!rt.sourceId) continue;
+        try {
+          await playSourceById(rt.sourceId);
+        } catch (err) {
+          console.error(`[System] Failed to re-attach output for "${rt.name}":`, err.message);
+        }
+      }
     }
     res.json({ status: 'success' });
   } catch (err) {
@@ -873,6 +1043,16 @@ app.get('/api/system/status', (req, res) => {
     casparcg: procManager.isRunning('casparcg'),
     mediamtx: procManager.isRunning('mediamtx')
   });
+});
+
+/**
+ * GET /api/health?since=<ms timestamp>
+ * Hardware load now, history (only points newer than "since", if given),
+ * and the incident log with a per-incident hardware verdict. See
+ * health-monitor.js.
+ */
+app.get('/api/health', (req, res) => {
+  res.json(health.getReport(Number(req.query.since) || 0));
 });
 
 /**
@@ -912,79 +1092,79 @@ app.get('/', (req, res) => {
 // throws anywhere the dashboard can see it. The only reliable signal is
 // INFO LAYER's foreground.file[].time[0] (current playback position, verified
 // live: it advances continuously on a healthy feed) - if it stops advancing,
-// the source has stalled. Sources are read fresh from the active channel on
-// every tick, so adding/reordering sources takes effect immediately.
+// the source has stalled. Sources are read fresh from the channel on every
+// tick, so adding/reordering sources takes effect immediately. Each on-air
+// channel is tracked and fails over independently of the others.
 const WATCHDOG_INTERVAL_MS = 6000;
 const STALL_THRESHOLD = 2; // consecutive non-advancing polls (~12s) before failing over
 const ALL_DOWN_COOLDOWN_MS = 60000; // pause after cycling through every source with no luck
 
-let lastPlaybackTime = null;
-let stallTicks = 0;
-let watchdogPausedUntil = 0;
-let failoverStartSourceId = null; // detects a full cycle back to where we started
-
 // Must be called on every *manual* source change (an explicit /api/stream/play
 // or a channel activation) - not from within the watchdog's own cascade. Stale
-// tracking state left over from a previous channel/source otherwise corrupts
-// the "have we cycled through everything" check: it was observed live tonight
-// switching a single-source channel to itself in a loop instead of correctly
-// pausing, because failoverStartSourceId still held an id from the channel
-// that was active before the switch.
-function resetFailoverTracking() {
-  lastPlaybackTime = null;
-  stallTicks = 0;
-  failoverStartSourceId = null;
-  watchdogPausedUntil = 0;
+// tracking state left over from a previous source otherwise corrupts the
+// "have we cycled through everything" check: it was observed live switching a
+// single-source channel to itself in a loop instead of correctly pausing,
+// because failoverStartSourceId still held an id from a previous channel.
+function resetFailoverTracking(rt) {
+  rt.watchdog.lastPlaybackTime = null;
+  rt.watchdog.stallTicks = 0;
+  rt.watchdog.failoverStartSourceId = null;
+  rt.watchdog.pausedUntil = 0;
 }
 
-async function checkSourceHealth() {
-  if (!state.activeSourceId || Date.now() < watchdogPausedUntil) return;
+async function checkSourceHealth(rt) {
+  const wd = rt.watchdog;
+  if (!rt.sourceId || Date.now() < wd.pausedUntil) return;
 
-  const channel = await getActiveChannel().catch(() => null);
+  const channel = await Channel.findByPk(rt.channelId, { include: [Source] }).catch(() => null);
   if (!channel) return;
 
   let response;
   try {
-    const sendResult = await caspar.infoLayer({ channel: channel.casparChannelNumber, layer: 1 });
+    const sendResult = await caspar.infoLayer({ channel: rt.casparChannelNumber, layer: 1 });
     if (sendResult.error) throw sendResult.error;
     response = await sendResult.request;
   } catch (err) {
     return; // CasparCG unreachable - the connect/disconnect events already track that
   }
+  // Taken off air while waiting on CasparCG - nothing left to fail over.
+  if (onAir.get(rt.channelId) !== rt) return;
 
   const layer = response?.data?.channel?.layers?.[0];
   const currentTime = layer?.foreground?.file?.[0]?.time?.[0];
   const producer = layer?.foreground?.producer?.[0];
 
-  const stalled = producer !== 'ffmpeg' || currentTime === undefined || currentTime === lastPlaybackTime;
-  lastPlaybackTime = currentTime;
+  const stalled = producer !== 'ffmpeg' || currentTime === undefined || currentTime === wd.lastPlaybackTime;
+  wd.lastPlaybackTime = currentTime;
 
   if (!stalled) {
-    stallTicks = 0;
-    failoverStartSourceId = null;
+    wd.stallTicks = 0;
+    wd.failoverStartSourceId = null;
     return;
   }
 
-  stallTicks += 1;
-  if (stallTicks < STALL_THRESHOLD) return;
+  wd.stallTicks += 1;
+  if (wd.stallTicks < STALL_THRESHOLD) return;
 
   // Confirmed stalled - fail over to the next source in rotation, ordered by priority.
-  stallTicks = 0;
-  lastPlaybackTime = null;
-  if (failoverStartSourceId === null) failoverStartSourceId = state.activeSourceId;
+  wd.stallTicks = 0;
+  wd.lastPlaybackTime = null;
+  if (wd.failoverStartSourceId === null) wd.failoverStartSourceId = rt.sourceId;
 
   const ordered = [...channel.Sources].sort((a, b) => a.priority - b.priority);
-  const currentIndex = ordered.findIndex((s) => s.id === state.activeSourceId);
+  const currentIndex = ordered.findIndex((s) => s.id === rt.sourceId);
   const next = ordered[(currentIndex + 1) % ordered.length];
 
-  if (!next || next.id === failoverStartSourceId) {
-    console.error('[Failover] All configured sources appear to be down - pausing auto-failover for 60s');
-    watchdogPausedUntil = Date.now() + ALL_DOWN_COOLDOWN_MS;
-    failoverStartSourceId = null;
+  if (!next || next.id === wd.failoverStartSourceId) {
+    console.error(`[Failover] "${rt.name}": all configured sources appear to be down - pausing auto-failover for 60s`);
+    health.recordIncident({ type: 'sources-down', channel: rt.name, message: 'Every source stalled - auto-failover paused for 60s' });
+    wd.pausedUntil = Date.now() + ALL_DOWN_COOLDOWN_MS;
+    wd.failoverStartSourceId = null;
     return;
   }
 
-  console.error(`[Failover] "${state.activeSourceLabel}" stalled - switching to "${next.label}"`);
+  console.error(`[Failover] "${rt.name}": "${rt.sourceLabel}" stalled - switching to "${next.label}"`);
+  health.recordIncident({ type: 'failover', channel: rt.name, message: `"${rt.sourceLabel}" stalled - switched to "${next.label}"` });
   try {
     await playSourceById(next.id);
   } catch (err) {
@@ -993,7 +1173,21 @@ async function checkSourceHealth() {
   }
 }
 
-setInterval(checkSourceHealth, WATCHDOG_INTERVAL_MS);
+// Channels are checked one after another, and a tick is skipped entirely if
+// the previous one is still running, so a slow CasparCG reply with many
+// channels on air can't pile up overlapping checks of the same channel.
+let watchdogRunning = false;
+async function checkAllChannels() {
+  if (watchdogRunning) return;
+  watchdogRunning = true;
+  try {
+    for (const rt of [...onAir.values()]) await checkSourceHealth(rt);
+  } finally {
+    watchdogRunning = false;
+  }
+}
+
+setInterval(checkAllChannels, WATCHDOG_INTERVAL_MS);
 
 // --- STARTUP ---
 function sleep(ms) {
@@ -1001,6 +1195,8 @@ function sleep(ms) {
 }
 
 async function start() {
+  health.start();
+
   // Broad, name-based cleanup first: catches any stray casparcg.exe/mediamtx.exe
   // left running from before this dashboard process existed (e.g. a previous
   // crash), the same guarantee start-all.bat used to provide. Routine
@@ -1020,20 +1216,34 @@ async function start() {
   await sleep(1500);
 
   await sequelize.authenticate();
-  const channel = await getActiveChannel();
-  if (channel) {
-    state.activeChannelId = channel.id;
-    state.activeChannelName = channel.name;
+  const channels = await Channel.findAll({ where: { isActive: true }, include: [Source], order: [['id', 'ASC']] });
+  for (const channel of channels) {
+    // Should never happen (activation refuses it), but a hand-edited DB
+    // could have two on-air channels fighting over one CasparCG channel.
+    const clash = [...onAir.values()].find((rt) => rt.casparChannelNumber === channel.casparChannelNumber);
+    if (clash) {
+      console.error(`[Startup] "${channel.name}" shares CasparCG channel ${channel.casparChannelNumber} with "${clash.name}" - taking it off air`);
+      await channel.update({ isActive: false });
+      continue;
+    }
     // Pre-set the source we intend to play (without playing it yet - CasparCG
     // isn't necessarily reachable this instant). caspar.on('connect', ...)
-    // above already knows how to (re)establish whatever state.activeSourceId
-    // points at, including applying that channel's default presets, so a
-    // fully fresh boot recovers the exact same way a mid-session reconnect
-    // does - no separate "first boot" logic needed.
+    // above already knows how to (re)establish whatever each on-air channel's
+    // sourceId points at, including applying its default presets, so a fully
+    // fresh boot recovers the exact same way a mid-session reconnect does -
+    // no separate "first boot" logic needed.
+    const rt = newRuntime(channel);
     const topSource = [...channel.Sources].sort((a, b) => a.priority - b.priority)[0];
-    if (topSource) state.activeSourceId = topSource.id;
+    if (topSource) {
+      rt.sourceId = topSource.id;
+      rt.sourceLabel = topSource.label;
+    }
+    onAir.set(channel.id, rt);
+  }
+  if (onAir.size === 0) {
+    console.warn('[Startup] No on-air channels - take one live from the dashboard (or run "node db/seed.js" on a fresh install).');
   } else {
-    console.warn('[Startup] No active channel found in the database - run "node db/seed.js" first.');
+    console.log(`[Startup] Restoring ${onAir.size} on-air channel(s): ${[...onAir.values()].map((rt) => `"${rt.name}" (ch ${rt.casparChannelNumber})`).join(', ')}`);
   }
 
   app.listen(PORT, () => {
@@ -1047,6 +1257,8 @@ async function start() {
 // stopped normally) so they don't linger as orphans needing a manual taskkill.
 async function shutdown() {
   console.log('[Shutdown] Stopping managed CasparCG/MediaMTX processes...');
+  shuttingDown = true;
+  health.stop();
   await procManager.stopProcess('casparcg');
   await procManager.stopProcess('mediamtx');
   process.exit(0);

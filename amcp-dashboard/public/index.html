@@ -7,6 +7,29 @@
   <!-- Tailwind CSS CDN -->
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
+  <style>
+    /* Chart tokens for the Health tab. This page is dark-only, so these are
+       the dark-surface steps: series from the reference categorical palette,
+       status colors from its fixed status palette (always paired with an
+       icon + label in the UI, never used for a series). */
+    :root {
+      --viz-surface: #1e293b;
+      --viz-grid: #2b3647;
+      --viz-axis: #475569;
+      --viz-muted: #94a3b8;
+      --viz-ink: #e2e8f0;
+      --series-1: #3987e5;
+      --series-1-hover: #6da7ec;
+      --series-2: #d95926;
+      --status-good: #0ca30c;
+      --status-warning: #fab219;
+      --status-critical: #d03b3b;
+    }
+    .viz-tick { font-size: 10px; fill: var(--viz-muted); font-variant-numeric: tabular-nums; }
+    .viz-value { font-size: 11px; font-weight: 600; fill: var(--viz-ink); }
+    .viz-tooltip { position: absolute; pointer-events: none; z-index: 10; background: #0f172a; border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 6px; padding: 6px 8px; font-size: 11px; white-space: nowrap; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4); }
+    .viz-table td, .viz-table th { font-variant-numeric: tabular-nums; }
+  </style>
 </head>
 <body class="bg-slate-900 text-slate-100 min-h-screen p-4 md:p-8 flex justify-center">
 
@@ -20,7 +43,14 @@
     <header class="border-b border-slate-800 pb-4 flex items-center justify-between">
       <div>
         <h1 class="text-2xl font-bold text-sky-400">Stream Branding & Live Production Console</h1>
-        <p class="text-slate-400 text-sm mt-1" id="active-channel-label">Loading...</p>
+        <!-- Which channel every control on this page acts on. Several
+             channels can be on air at once; this only picks the one being
+             operated, it never takes anything on or off air by itself. -->
+        <div class="flex flex-wrap items-center gap-2 mt-1">
+          <span class="text-slate-400 text-sm">Controlling:</span>
+          <select id="channel-select" onchange="selectChannel(Number(this.value))" class="bg-slate-800 border border-slate-700 rounded-lg px-2 py-1 text-sm text-slate-100 focus:outline-none focus:border-sky-500"></select>
+          <span id="channel-air-badge"></span>
+        </div>
       </div>
       <button onclick="logout(this)" class="text-slate-400 hover:text-slate-200 text-sm border border-slate-700 rounded-lg px-3 py-1.5 transition">Log Out</button>
     </header>
@@ -39,6 +69,7 @@
           <button id="tab-btn-channels" onclick="setMainTab('channels')" class="px-4 py-2 rounded-lg text-sm font-medium transition whitespace-nowrap">Channels</button>
           <button id="tab-btn-graphics" onclick="setMainTab('graphics')" class="px-4 py-2 rounded-lg text-sm font-medium transition whitespace-nowrap">Graphics</button>
           <button id="tab-btn-cloud" onclick="setMainTab('cloud')" class="px-4 py-2 rounded-lg text-sm font-medium transition whitespace-nowrap">Cloud Streams</button>
+          <button id="tab-btn-health" onclick="setMainTab('health')" class="px-4 py-2 rounded-lg text-sm font-medium transition whitespace-nowrap">Health</button>
           <button id="tab-btn-system" onclick="setMainTab('system')" class="px-4 py-2 rounded-lg text-sm font-medium transition whitespace-nowrap">System &amp; Logs</button>
         </div>
 
@@ -72,16 +103,17 @@
           <!-- SRT Feed Control -->
           <div class="bg-slate-800/80 border border-slate-700/60 rounded-xl p-6 shadow-lg">
             <div class="flex items-center justify-between border-b border-slate-700/60 pb-2 mb-4">
-              <h2 class="text-base font-semibold text-slate-200">Live Input Feed</h2>
+              <h2 class="text-base font-semibold text-slate-200">Live Input Feed <span class="selected-channel-name text-slate-400 font-normal"></span></h2>
               <button onclick="toggleNewSourceForm()" class="text-sky-400 hover:text-sky-300 text-xs font-medium">+ Add Source</button>
             </div>
+            <p class="off-air-hint hidden text-xs text-amber-400 mb-3">This channel is off air - Go Live to play its sources.</p>
             <div id="source-buttons" class="flex flex-col gap-2 mb-2">
               <span class="text-slate-500 text-sm">Loading sources...</span>
             </div>
             <div id="new-source-form" class="hidden flex flex-wrap gap-2 mb-3 pt-3 border-t border-slate-700/50">
               <input type="text" id="ns-label" placeholder="Label" class="flex-1 min-w-[120px] bg-slate-900 border border-slate-700 rounded-lg p-2 text-slate-100 text-sm focus:outline-none focus:border-sky-500 transition">
               <input type="text" id="ns-url" placeholder="Source URL (any format: srt://, rtmp://, rtsp://, http(s)://...)" class="flex-[2] min-w-[220px] bg-slate-900 border border-slate-700 rounded-lg p-2 text-slate-100 text-sm focus:outline-none focus:border-sky-500 transition">
-              <button onclick="addSourceToActiveChannel()" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition">Add</button>
+              <button onclick="addSourceToSelectedChannel()" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition">Add</button>
             </div>
             <button onclick="clearChannel()" class="bg-red-600 hover:bg-red-700 text-white px-4 py-2.5 rounded-lg font-medium text-sm transition w-full">Clear Channel</button>
           </div>
@@ -92,7 +124,8 @@
         <div id="tab-panel-graphics" class="hidden">
         <!-- Graphics Control -->
         <div class="bg-slate-800/80 border border-slate-700/60 rounded-xl p-6 shadow-lg">
-          <h2 class="text-base font-semibold text-slate-200 border-b border-slate-700/60 pb-2 mb-4">CG Graphics Control</h2>
+          <h2 class="text-base font-semibold text-slate-200 border-b border-slate-700/60 pb-2 mb-4">CG Graphics Control <span class="selected-channel-name text-slate-400 font-normal"></span></h2>
+          <p class="off-air-hint hidden text-xs text-amber-400 mb-4">This channel is off air - Go Live before showing graphics. Presets can still be saved.</p>
 
           <!-- Lower Third -->
           <div class="border border-slate-700/50 rounded-lg p-4 mb-4">
@@ -213,6 +246,63 @@
         </div>
         </div>
 
+        <!-- Tab: Health - hardware load, so a channel problem can be checked
+             against what the machine was doing at the time. Data comes from
+             health-monitor.js via /api/health. -->
+        <div id="tab-panel-health" class="hidden">
+
+          <div class="bg-slate-800/80 border border-slate-700/60 rounded-xl p-6 shadow-lg">
+            <div class="flex items-center justify-between border-b border-slate-700/60 pb-2 mb-3">
+              <h2 class="text-base font-semibold text-slate-200">Hardware Health</h2>
+              <span id="health-overall"></span>
+            </div>
+            <p id="health-summary" class="text-xs text-slate-400 mb-4">Collecting the first samples...</p>
+            <div id="health-tiles" class="grid grid-cols-2 sm:grid-cols-3 gap-3"></div>
+            <p id="health-sources" class="text-xs text-slate-500 mt-3"></p>
+          </div>
+
+          <div class="bg-slate-800/80 border border-slate-700/60 rounded-xl p-6 shadow-lg">
+            <div class="flex items-center justify-between border-b border-slate-700/60 pb-2 mb-4">
+              <h2 class="text-base font-semibold text-slate-200">History</h2>
+              <div class="flex gap-1" role="group" aria-label="Time range">
+                <button id="health-range-15" onclick="setHealthRange(15)" class="px-3 py-1 rounded-lg text-xs font-medium transition">15 min</button>
+                <button id="health-range-60" onclick="setHealthRange(60)" class="px-3 py-1 rounded-lg text-xs font-medium transition">1 hour</button>
+              </div>
+            </div>
+            <p class="text-xs text-slate-500 mb-3">The amber line is the warning level. Hover (or focus and use the arrow keys) for exact values.</p>
+            <div id="health-charts" class="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-5"></div>
+            <details id="health-table-details" class="mt-4" ontoggle="renderHealthTable()">
+              <summary class="text-xs text-slate-400 hover:text-slate-200 cursor-pointer select-none">Show as a table (peak per minute)</summary>
+              <div id="health-table" class="overflow-x-auto mt-2 max-h-80 overflow-y-auto"></div>
+            </details>
+          </div>
+
+          <div class="bg-slate-800/80 border border-slate-700/60 rounded-xl p-6 shadow-lg">
+            <div class="flex items-baseline justify-between gap-2 border-b border-slate-700/60 pb-2 mb-3">
+              <h2 class="text-base font-semibold text-slate-200">CPU Cores (now)</h2>
+              <span id="health-cpu-model" class="text-xs text-slate-500 truncate"></span>
+            </div>
+            <div id="health-cores" class="relative"></div>
+          </div>
+
+          <div class="bg-slate-800/80 border border-slate-700/60 rounded-xl p-6 shadow-lg">
+            <h2 class="text-base font-semibold text-slate-200 border-b border-slate-700/60 pb-2 mb-3">Processes</h2>
+            <div id="health-processes" class="overflow-x-auto"></div>
+          </div>
+
+          <div class="bg-slate-800/80 border border-slate-700/60 rounded-xl p-6 shadow-lg">
+            <h2 class="text-base font-semibold text-slate-200 border-b border-slate-700/60 pb-2 mb-3">Network</h2>
+            <div id="health-network" class="overflow-x-auto"></div>
+          </div>
+
+          <div class="bg-slate-800/80 border border-slate-700/60 rounded-xl p-6 shadow-lg">
+            <h2 class="text-base font-semibold text-slate-200 border-b border-slate-700/60 pb-2 mb-2">Incidents</h2>
+            <p class="text-xs text-slate-500 mb-3">Every failover, source outage, CasparCG drop and process crash is logged with the peak hardware load in the minute before it, and a verdict on whether the hardware is a likely cause. Kept in memory since the dashboard last started.</p>
+            <div id="health-incidents" class="flex flex-col gap-2"></div>
+          </div>
+
+        </div>
+
         <!-- Tab: System & Logs -->
         <div id="tab-panel-system" class="hidden flex flex-col gap-6">
 
@@ -289,11 +379,19 @@
             <span class="text-slate-400">Live Source:</span>
             <span id="status-source" class="font-medium text-slate-200">None</span>
           </div>
+          <div class="flex items-center gap-2">
+            <span class="text-slate-400">On air:</span>
+            <span id="status-onair-count" class="font-medium text-slate-200">0</span>
+          </div>
+          <button onclick="setMainTab('health')" class="flex items-center gap-2 hover:opacity-80 transition">
+            <span class="text-slate-400">Hardware:</span>
+            <span id="status-hardware" class="text-xs text-slate-500">Checking...</span>
+          </button>
         </div>
 
         <!-- HLS Video Monitor -->
         <div class="bg-slate-800/80 border border-slate-700/60 rounded-xl p-6 shadow-lg">
-          <h2 class="text-base font-semibold text-slate-200 border-b border-slate-700/60 pb-2 mb-4">Live Output Monitor (HLS, with audio)</h2>
+          <h2 class="text-base font-semibold text-slate-200 border-b border-slate-700/60 pb-2 mb-4">Live Output Monitor <span class="selected-channel-name text-slate-400 font-normal"></span></h2>
           <div class="relative w-full aspect-video bg-black rounded-lg overflow-hidden border-2 border-sky-500/50 shadow-inner">
             <video id="preview" class="w-full h-full" controls autoplay muted playsinline></video>
             <div id="preview-offline" class="absolute inset-0 flex items-center justify-center text-slate-500 text-sm bg-black/60">Waiting for stream...</div>
@@ -317,7 +415,10 @@
 
   <script>
     const LOG_COLORS = { info: 'text-emerald-400', error: 'text-red-400', success: 'text-emerald-400' };
-    let activeChannel = null; // full channel record: {id, name, rtmpTarget, Sources[], BrandingPresets[]}
+    // The channel every control on the page acts on - any channel, on air or
+    // not. Full record: {id, name, rtmpTarget, casparChannelNumber, isActive, Sources[], BrandingPresets[]}
+    let selectedChannelId = null;
+    let selectedChannel = null;
     let allChannels = [];
     let tickerPosition = 'bottom';
     let currentProcessTab = 'dashboard';
@@ -472,7 +573,7 @@
     // --- Main tab bar (Channels / Graphics / Cloud Streams / System & Logs) ---
     // The video monitor and status bar live outside these tabs (sticky right
     // column in the HTML) so they stay visible no matter which tab is open.
-    const MAIN_TABS = ['channels', 'graphics', 'cloud', 'system'];
+    const MAIN_TABS = ['channels', 'graphics', 'cloud', 'health', 'system'];
 
     function setMainTab(name) {
       for (const tab of MAIN_TABS) {
@@ -481,6 +582,7 @@
           `px-4 py-2 rounded-lg text-sm font-medium transition whitespace-nowrap ${tab === name ? 'bg-sky-600 text-white' : 'bg-slate-800 text-slate-400 hover:text-slate-200'}`;
       }
       try { localStorage.setItem('mainTab', name); } catch { /* private browsing etc - just won't persist */ }
+      if (name === 'health' && typeof renderHealth === 'function' && healthReport) renderHealth();
     }
 
     function log(msg, level = 'info') {
@@ -582,44 +684,111 @@
     }
 
     // --- Channels ---
+    // Reloads every channel and re-renders everything that depends on the
+    // selected one. The single refresh path after any change to channels,
+    // sources or presets.
     async function loadChannels() {
       allChannels = await api('/api/channels');
+      if (!allChannels.some((c) => c.id === selectedChannelId)) {
+        // Keep the operator on the channel they last worked on, else the
+        // first on-air one, else just the first.
+        let remembered = null;
+        try { remembered = Number(localStorage.getItem('selectedChannelId')); } catch { /* ignore */ }
+        const pick = allChannels.find((c) => c.id === remembered) || allChannels.find((c) => c.isActive) || allChannels[0];
+        selectedChannelId = pick ? pick.id : null;
+      }
+      selectedChannel = allChannels.find((c) => c.id === selectedChannelId) || null;
       renderChannelList();
+      renderSelectedChannel();
+    }
+
+    function selectChannel(id) {
+      selectedChannelId = id;
+      try { localStorage.setItem('selectedChannelId', String(id)); } catch { /* ignore */ }
+      selectedChannel = allChannels.find((c) => c.id === id) || null;
+      renderChannelList();
+      renderSelectedChannel();
+      pollStatus();
     }
 
     function renderChannelList() {
       const container = document.getElementById('channel-list');
       container.innerHTML = '';
       for (const ch of allChannels) {
+        const selected = ch.id === selectedChannelId;
         const row = document.createElement('div');
-        row.className = `flex items-center justify-between rounded-lg p-2.5 border ${ch.isActive ? 'border-emerald-500/60 bg-emerald-500/10' : 'border-slate-700/50'}`;
+        row.className = `flex items-center justify-between gap-3 rounded-lg p-2.5 border cursor-pointer transition ${selected ? 'border-sky-500/70 bg-sky-500/10' : 'border-slate-700/50 hover:border-slate-600'}`;
+        row.title = 'Click to control this channel';
         row.innerHTML = `
-          <div>
-            <div class="text-sm font-medium ${ch.isActive ? 'text-emerald-400' : 'text-slate-200'}">${ch.name}${ch.isActive ? ' (Live)' : ''}</div>
-            <div class="text-xs text-slate-500">${ch.Sources.length} source(s)</div>
+          <div class="min-w-0">
+            <div class="text-sm font-medium text-slate-200 flex items-center gap-2">
+              ${ch.isActive ? '<span class="bg-red-600 text-white text-[10px] font-bold tracking-wide px-1.5 py-0.5 rounded">ON AIR</span>' : ''}
+              ${ch.name}
+            </div>
+            <div class="text-xs text-slate-500">${ch.Sources.length} source(s) &middot; CasparCG ch ${ch.casparChannelNumber}</div>
             <div class="text-xs text-slate-600 font-mono break-all">${deriveHlsUrl(ch.rtmpTarget)}</div>
           </div>
-          <div class="flex gap-2 shrink-0">
-            ${ch.isActive ? '' : `<button class="text-sky-400 hover:text-sky-300 text-xs font-medium">Activate</button>`}
-            ${ch.isActive ? '' : `<button class="text-red-400 hover:text-red-300 text-xs font-medium">Delete</button>`}
+          <div class="flex gap-2 shrink-0 items-center">
+            <button class="btn-air ${ch.isActive ? 'bg-slate-700 hover:bg-slate-600' : 'bg-emerald-600 hover:bg-emerald-700'} text-white px-3 py-1.5 rounded-lg text-xs font-medium transition">${ch.isActive ? 'Take Off Air' : 'Go Live'}</button>
+            ${ch.isActive ? '' : '<button class="btn-chnum text-slate-400 hover:text-sky-400 text-xs font-medium" title="Change which CasparCG channel this renders on">Ch #</button>'}
+            ${ch.isActive ? '' : '<button class="btn-del text-red-400 hover:text-red-300 text-xs font-medium">Delete</button>'}
           </div>`;
+        row.onclick = () => selectChannel(ch.id);
+        const airBtn = row.querySelector('.btn-air');
+        airBtn.onclick = (e) => { e.stopPropagation(); ch.isActive ? deactivateChannel(ch, airBtn) : activateChannel(ch.id, airBtn); };
         if (!ch.isActive) {
-          const [activateBtn, deleteBtn] = row.querySelectorAll('button');
-          activateBtn.onclick = () => activateChannel(ch.id, activateBtn);
-          deleteBtn.onclick = () => deleteChannel(ch.id, deleteBtn);
+          const chNumBtn = row.querySelector('.btn-chnum');
+          chNumBtn.onclick = (e) => { e.stopPropagation(); changeCasparChannel(ch, chNumBtn); };
+          const deleteBtn = row.querySelector('.btn-del');
+          deleteBtn.onclick = (e) => { e.stopPropagation(); deleteChannel(ch.id, deleteBtn); };
         }
         container.appendChild(row);
+      }
+
+      const select = document.getElementById('channel-select');
+      select.innerHTML = allChannels.length === 0 ? '<option>No channels yet</option>' : '';
+      for (const ch of allChannels) {
+        const opt = document.createElement('option');
+        opt.value = ch.id;
+        opt.textContent = `${ch.isActive ? '● ' : ''}${ch.name}`;
+        opt.selected = ch.id === selectedChannelId;
+        select.appendChild(opt);
       }
     }
 
     async function activateChannel(id, btn) {
-      log(`Activating channel...`);
+      log(`Taking channel live...`);
       await withLoading(btn, async () => {
         try {
           await api(`/api/channels/${id}/activate`, { method: 'POST' });
-          log('Channel activated', 'success');
+          log('Channel is on air', 'success');
         } catch (err) { log(`Error: ${err.message}`, 'error'); }
         await refreshAll();
+      });
+    }
+
+    async function deactivateChannel(ch, btn) {
+      if (!confirm(`Take "${ch.name}" off air? Its output stream stops.`)) return;
+      await withLoading(btn, async () => {
+        try {
+          await api(`/api/channels/${ch.id}/deactivate`, { method: 'POST' });
+          log(`"${ch.name}" taken off air`, 'success');
+        } catch (err) { log(`Error: ${err.message}`, 'error'); }
+        await refreshAll();
+      });
+    }
+
+    async function changeCasparChannel(ch, btn) {
+      const raw = prompt(`CasparCG channel number for "${ch.name}" (it must exist in casparcg.config):`, ch.casparChannelNumber);
+      if (raw === null) return;
+      const casparChannelNumber = Number(raw);
+      if (!Number.isInteger(casparChannelNumber) || casparChannelNumber < 1) return log('CasparCG channel number must be a whole number of 1 or more', 'error');
+      await withLoading(btn, async () => {
+        try {
+          await api(`/api/channels/${ch.id}`, { method: 'PUT', body: JSON.stringify({ casparChannelNumber }) });
+          log(`"${ch.name}" now renders on CasparCG channel ${casparChannelNumber}`, 'success');
+        } catch (err) { log(`Error: ${err.message}`, 'error'); }
+        await loadChannels();
       });
     }
 
@@ -675,13 +844,29 @@
       });
     }
 
-    // --- Sources (on the active channel) ---
-    async function loadActiveChannel() {
-      activeChannel = await api('/api/channels/active');
-      document.getElementById('active-channel-label').textContent = `Channel: ${activeChannel.name}`;
+    // --- Sources (on the selected channel) ---
+    let previewUrl = null;
+
+    function renderSelectedChannel() {
+      const ch = selectedChannel;
+      document.querySelectorAll('.selected-channel-name').forEach((el) => { el.textContent = ch ? `- ${ch.name}` : ''; });
+      document.querySelectorAll('.off-air-hint').forEach((el) => el.classList.toggle('hidden', !ch || ch.isActive));
+      document.getElementById('channel-air-badge').innerHTML = !ch ? ''
+        : ch.isActive ? '<span class="bg-red-600 text-white text-[10px] font-bold tracking-wide px-1.5 py-0.5 rounded">ON AIR</span>'
+        : '<span class="text-xs text-slate-500">Off air</span>';
       renderSourceButtons();
       renderPresets();
-      document.getElementById('hls-link').innerText = deriveHlsUrl(activeChannel.rtmpTarget);
+
+      const url = ch ? deriveHlsUrl(ch.rtmpTarget) : null;
+      document.getElementById('hls-link').innerText = url || 'No channel selected';
+      // Only restart the player when the URL actually changes - this runs on
+      // every reload of the channel list, and restarting would blank the
+      // preview each time.
+      if (url !== previewUrl) {
+        previewUrl = url;
+        if (url) startPreview(url);
+        else stopPreview();
+      }
     }
 
     function deriveHlsUrl(rtmpTarget) {
@@ -693,7 +878,11 @@
     function renderSourceButtons() {
       const container = document.getElementById('source-buttons');
       container.innerHTML = '';
-      const sorted = [...activeChannel.Sources].sort((a, b) => a.priority - b.priority);
+      if (!selectedChannel) {
+        container.innerHTML = '<span class="text-slate-500 text-sm">No channel selected - create one above.</span>';
+        return;
+      }
+      const sorted = [...selectedChannel.Sources].sort((a, b) => a.priority - b.priority);
       if (sorted.length === 0) {
         container.innerHTML = '<span class="text-slate-500 text-sm">No sources yet - add one below.</span>';
         return;
@@ -739,19 +928,19 @@
           await api(`/api/sources/${id}`, { method: 'PUT', body: JSON.stringify({ label, url }) });
           log(`Source "${label}" updated`, 'success');
         } catch (err) { log(`Error: ${err.message}`, 'error'); }
-        await loadActiveChannel();
+        await loadChannels();
       });
     }
 
     async function deleteSource(id, btn) {
-      if (activeChannel.Sources.length <= 1) return log('Cannot delete the only source on this channel', 'error');
+      if (selectedChannel.Sources.length <= 1) return log('Cannot delete the only source on this channel', 'error');
       if (!confirm('Delete this source?')) return;
       await withLoading(btn, async () => {
         try {
           await api(`/api/sources/${id}`, { method: 'DELETE' });
           log('Source deleted', 'success');
         } catch (err) { log(`Error: ${err.message}`, 'error'); }
-        await loadActiveChannel();
+        await loadChannels();
       });
     }
 
@@ -759,21 +948,22 @@
       document.getElementById('new-source-form').classList.toggle('hidden');
     }
 
-    async function addSourceToActiveChannel() {
+    async function addSourceToSelectedChannel() {
+      if (!selectedChannel) return log('Select a channel first', 'error');
       const label = document.getElementById('ns-label').value;
       const url = document.getElementById('ns-url').value;
       if (!label || !url) return log('Source label and URL are required', 'error');
       try {
-        await api(`/api/channels/${activeChannel.id}/sources`, {
+        await api(`/api/channels/${selectedChannel.id}/sources`, {
           method: 'POST',
-          body: JSON.stringify({ label, url, priority: activeChannel.Sources.length })
+          body: JSON.stringify({ label, url, priority: selectedChannel.Sources.length })
         });
-        log(`Source "${label}" added`, 'success');
+        log(`Source "${label}" added to "${selectedChannel.name}"`, 'success');
         document.getElementById('ns-label').value = '';
         document.getElementById('ns-url').value = '';
         toggleNewSourceForm();
       } catch (err) { log(`Error: ${err.message}`, 'error'); }
-      await loadActiveChannel();
+      await loadChannels();
     }
 
     function setSourceButtonActive(sourceId) {
@@ -794,19 +984,22 @@
     }
 
     async function clearChannel() {
+      if (!selectedChannel) return log('Select a channel first', 'error');
       try {
-        await api('/api/stream/clear', { method: 'POST' });
-        log('Channel Cleared', 'success');
+        await api('/api/stream/clear', { method: 'POST', body: JSON.stringify({ channelId: selectedChannel.id }) });
+        log(`"${selectedChannel.name}" cleared`, 'success');
       } catch (err) { log(`Error: ${err.message}`, 'error'); }
       pollStatus();
     }
 
-    // --- Graphics & presets ---
+    // --- Graphics & presets (on the selected channel) ---
     async function showGraphic(template, data, btn) {
-      log(`Triggering "${template}" overlay...`);
+      if (!selectedChannel) return log('Select a channel first', 'error');
+      const channelId = selectedChannel.id;
+      log(`Triggering "${template}" overlay on "${selectedChannel.name}"...`);
       await withLoading(btn, async () => {
         try {
-          await api('/api/graphic/show', { method: 'POST', body: JSON.stringify({ template, data }) });
+          await api('/api/graphic/show', { method: 'POST', body: JSON.stringify({ channelId, template, data }) });
           log(`Graphic ON: "${template}"`, 'success');
         } catch (err) { log(`Error: ${err.message}`, 'error'); }
         pollStatus();
@@ -814,10 +1007,12 @@
     }
 
     async function hideGraphic(template, btn) {
-      log(`Taking down "${template}" overlay...`);
+      if (!selectedChannel) return log('Select a channel first', 'error');
+      const channelId = selectedChannel.id;
+      log(`Taking down "${template}" overlay on "${selectedChannel.name}"...`);
       await withLoading(btn, async () => {
         try {
-          await api('/api/graphic/hide', { method: 'POST', body: JSON.stringify({ template }) });
+          await api('/api/graphic/hide', { method: 'POST', body: JSON.stringify({ channelId, template }) });
           log(`Graphic OFF: "${template}"`, 'success');
         } catch (err) { log(`Error: ${err.message}`, 'error'); }
         pollStatus();
@@ -883,14 +1078,15 @@
     }
 
     async function savePreset(template, data, btn) {
-      const name = prompt(`Name this ${template.replace('_', ' ')} preset:`);
+      if (!selectedChannel) return log('Select a channel first', 'error');
+      const name = prompt(`Name this ${template.replace('_', ' ')} preset for "${selectedChannel.name}":`);
       if (!name) return;
       await withLoading(btn, async () => {
         try {
-          await api(`/api/channels/${activeChannel.id}/presets`, { method: 'POST', body: JSON.stringify({ name, template, data }) });
+          await api(`/api/channels/${selectedChannel.id}/presets`, { method: 'POST', body: JSON.stringify({ name, template, data }) });
           log(`Preset "${name}" saved`, 'success');
         } catch (err) { log(`Error: ${err.message}`, 'error'); }
-        await loadActiveChannel();
+        await loadChannels();
       });
     }
 
@@ -918,7 +1114,7 @@
           await api(`/api/presets/${id}`, { method: 'DELETE' });
           log('Preset deleted', 'success');
         } catch (err) { log(`Error: ${err.message}`, 'error'); }
-        await loadActiveChannel();
+        await loadChannels();
       });
     }
 
@@ -926,9 +1122,9 @@
       await withLoading(btn, async () => {
         try {
           await api(`/api/presets/${id}/set-default`, { method: 'POST', body: JSON.stringify({ isDefault }) });
-          log(isDefault ? 'Set as default - will auto-apply on activate/reconnect' : 'Unset as default', 'success');
+          log(isDefault ? 'Set as default - will auto-apply on going live/reconnect' : 'Unset as default', 'success');
         } catch (err) { log(`Error: ${err.message}`, 'error'); }
-        await loadActiveChannel();
+        await loadChannels();
       });
     }
 
@@ -938,7 +1134,7 @@
       for (const template of ['lower_third', 'logo_bug', 'ticker', ...imageOverlayKeys, ...censorBoxKeys]) {
         const container = document.getElementById(`presets-${template}`);
         container.innerHTML = '';
-        const presets = activeChannel.BrandingPresets.filter((p) => p.template === template);
+        const presets = (selectedChannel?.BrandingPresets || []).filter((p) => p.template === template);
         for (const preset of presets) {
           const chip = document.createElement('div');
           chip.className = `flex items-center gap-1 bg-slate-900 border rounded-full pl-3 pr-1 py-1 text-xs ${preset.isDefault ? 'border-amber-500/60' : 'border-slate-700'}`;
@@ -949,7 +1145,7 @@
           applyBtn.onclick = (e) => applyPreset(preset.id, e.currentTarget);
           const defaultBtn = document.createElement('button');
           defaultBtn.textContent = preset.isDefault ? 'Unset default' : 'Set default';
-          defaultBtn.title = 'Auto-apply this preset whenever the channel activates or CasparCG reconnects';
+          defaultBtn.title = 'Auto-apply this preset whenever the channel goes live or CasparCG reconnects';
           defaultBtn.className = 'text-amber-400 hover:text-amber-300 px-1.5';
           defaultBtn.onclick = (e) => setPresetDefault(preset.id, !preset.isDefault, e.currentTarget);
           const delBtn = document.createElement('button');
@@ -1136,14 +1332,24 @@
     async function pollStatus() {
       try {
         const s = await api('/api/status');
+        const onAirIds = Object.keys(s.channels || {}).map(Number);
         document.getElementById('dot-caspar').className = `w-2.5 h-2.5 rounded-full ${s.casparConnected ? 'bg-emerald-500' : 'bg-red-500'}`;
-        document.getElementById('dot-stream').className = `w-2.5 h-2.5 rounded-full ${s.streamConsumerActive ? 'bg-emerald-500' : 'bg-slate-600'}`;
-        document.getElementById('status-source').textContent = s.activeSourceLabel || 'None';
-        setSourceButtonActive(s.activeSourceId);
-        for (const [template, visible] of Object.entries(s.activeGraphics || {})) {
-          const dot = document.getElementById(`graphic-dot-${template}`);
-          if (dot) dot.className = `w-2 h-2 rounded-full ${visible ? 'bg-emerald-500' : 'bg-slate-600'}`;
-        }
+        document.getElementById('status-onair-count').textContent = String(onAirIds.length);
+
+        // Everything below describes the selected channel only.
+        const rt = selectedChannel ? s.channels?.[selectedChannel.id] : null;
+        document.getElementById('dot-stream').className = `w-2.5 h-2.5 rounded-full ${rt?.streamConsumerActive ? 'bg-emerald-500' : 'bg-slate-600'}`;
+        document.getElementById('status-source').textContent = rt ? (rt.activeSourceLabel || 'None') : 'Off air';
+        setSourceButtonActive(rt?.activeSourceId);
+        document.querySelectorAll('[id^="graphic-dot-"]').forEach((dot) => {
+          const visible = !!rt?.activeGraphics?.[dot.id.slice('graphic-dot-'.length)];
+          dot.className = `w-2 h-2 rounded-full ${visible ? 'bg-emerald-500' : 'bg-slate-600'}`;
+        });
+
+        // Another operator (or a second tab) may have taken channels on or
+        // off air - resync the list when the server disagrees with it.
+        const listedOnAir = allChannels.filter((c) => c.isActive).map((c) => c.id);
+        if (listedOnAir.length !== onAirIds.length || listedOnAir.some((id) => !onAirIds.includes(id))) loadChannels();
       } catch {
         document.getElementById('dot-caspar').className = 'w-2.5 h-2.5 rounded-full bg-red-500';
       }
@@ -1208,7 +1414,14 @@
 
     function startPreview(hlsUrl) {
       if (hls) hls.destroy();
+      offlineOverlay.classList.remove('hidden');
       hls = attachHlsWithFailover(video, hlsUrl, () => offlineOverlay.classList.remove('hidden'));
+    }
+
+    function stopPreview() {
+      if (hls) { hls.destroy(); hls = null; }
+      video.removeAttribute('src');
+      offlineOverlay.classList.remove('hidden');
     }
     video.addEventListener('playing', () => offlineOverlay.classList.add('hidden'));
     video.addEventListener('waiting', () => offlineOverlay.classList.remove('hidden'));
@@ -1238,10 +1451,499 @@
 
     async function refreshAll() {
       await loadChannels();
-      await loadActiveChannel();
-      startPreview(deriveHlsUrl(activeChannel.rtmpTarget));
       pollStatus();
     }
+
+    // --- Hardware health (see health-monitor.js) ---
+    // Status always ships as icon + label, never color alone.
+    const STATUS_META = {
+      ok: { icon: '✓', label: 'OK', color: 'var(--status-good)' },
+      warning: { icon: '▲', label: 'Warning', color: 'var(--status-warning)' },
+      critical: { icon: '✕', label: 'Critical', color: 'var(--status-critical)' },
+      unknown: { icon: '–', label: 'No data', color: 'var(--viz-muted)' }
+    };
+    const HEALTH_HISTORY_MAX = 720; // matches the server's hour of 5s samples
+    const SERIES_COLORS = ['var(--series-1)', 'var(--series-2)'];
+    const HEALTH_CHARTS = [
+      { title: 'CPU', series: [{ key: 'cpu', label: 'CPU' }], threshold: 'cpu', unit: '%' },
+      { title: 'Busiest CPU core', series: [{ key: 'maxCore', label: 'Busiest core' }], threshold: 'maxCore', unit: '%' },
+      { title: 'Memory', series: [{ key: 'memory', label: 'Memory' }], threshold: 'memory', unit: '%' },
+      { title: 'GPU', series: [{ key: 'gpu', label: 'GPU' }], threshold: 'gpu', unit: '%' },
+      { title: 'GPU video encoder', series: [{ key: 'encoder', label: 'Encoder' }], threshold: 'encoder', unit: '%' },
+      { title: 'Network, all adapters (Mb/s)', series: [{ key: 'rxMbps', label: 'In' }, { key: 'txMbps', label: 'Out' }], unit: 'Mb/s' }
+    ];
+    const INCIDENT_TYPES = {
+      failover: 'Source failover',
+      'sources-down': 'All sources down',
+      'casparcg-disconnect': 'CasparCG disconnected',
+      'process-exit': 'Process crashed',
+      hardware: 'Hardware overload'
+    };
+    const VERDICTS = {
+      likely: { level: 'critical', label: 'Hardware likely', text: 'Hardware was at a critical level in the minute before - a likely cause.' },
+      possible: { level: 'warning', label: 'Hardware possible', text: 'Hardware was under strain in the minute before - a possible factor.' },
+      unlikely: { level: 'ok', label: 'Hardware normal', text: 'Hardware was normal - look at the source or the network instead.' },
+      unknown: { level: 'unknown', label: 'No hardware data', text: 'Happened before the first hardware sample.' }
+    };
+
+    let healthReport = null;
+    let healthHistory = [];
+    let healthRangeMs = 15 * 60 * 1000;
+    let healthHover = null; // { chart, t } - survives the 5s re-render
+    let healthPollInFlight = false;
+
+    const svgNS = 'http://www.w3.org/2000/svg';
+    function svgEl(tag, attrs) {
+      const el = document.createElementNS(svgNS, tag);
+      for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+      return el;
+    }
+    function el(tag, className, text) {
+      const e = document.createElement(tag);
+      if (className) e.className = className;
+      if (text !== undefined) e.textContent = text;
+      return e;
+    }
+
+    function statusBadge(level, text) {
+      const m = STATUS_META[level] || STATUS_META.unknown;
+      const span = el('span', 'inline-flex items-center gap-1 text-xs font-medium text-slate-200 whitespace-nowrap');
+      const icon = el('span', '', m.icon);
+      icon.style.color = m.color;
+      icon.setAttribute('aria-hidden', 'true');
+      span.append(icon, document.createTextNode(text ?? m.label));
+      return span;
+    }
+
+    function fmtMetric(metric, v) {
+      if (typeof v !== 'number') return '–';
+      return metric === 'gpuTemp' ? `${Math.round(v)}°C` : `${Math.round(v)}%`;
+    }
+    function fmtValue(v, unit) {
+      if (typeof v !== 'number') return '–';
+      if (unit === '%') return `${Math.round(v)}%`;
+      return `${v < 10 ? v.toFixed(1) : Math.round(v)} ${unit}`;
+    }
+    function fmtTick(v, unit) {
+      if (unit === '%') return `${Math.round(v)}%`;
+      return v < 10 && v % 1 ? v.toFixed(1) : String(Math.round(v));
+    }
+    function fmtGB(bytes) { return typeof bytes === 'number' ? `${(bytes / 1024 ** 3).toFixed(1)} GB` : '–'; }
+    function fmtClock(t, withSeconds) {
+      const d = new Date(t);
+      const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', ...(withSeconds && { second: '2-digit' }) });
+      return d.toDateString() === new Date().toDateString() ? time : `${d.toLocaleDateString()} ${time}`;
+    }
+    function niceMax(v) {
+      const p = 10 ** Math.floor(Math.log10(v));
+      for (const m of [1, 2, 5, 10]) if (m * p >= v) return m * p;
+      return 10 * p;
+    }
+
+    async function pollHealth() {
+      if (healthPollInFlight) return;
+      healthPollInFlight = true;
+      try {
+        const since = healthHistory.length ? healthHistory[healthHistory.length - 1].t : 0;
+        const r = await api(`/api/health${since ? `?since=${since}` : ''}`);
+        healthReport = r;
+        healthHistory.push(...r.history);
+        if (healthHistory.length > HEALTH_HISTORY_MAX) healthHistory.splice(0, healthHistory.length - HEALTH_HISTORY_MAX);
+        renderHardwareStatus();
+        if (!document.getElementById('tab-panel-health').classList.contains('hidden')) renderHealth();
+      } catch { /* keep the last render */ } finally {
+        healthPollInFlight = false;
+      }
+    }
+
+    // Status-bar indicator, visible from every tab.
+    function renderHardwareStatus() {
+      const status = healthReport?.status;
+      const target = document.getElementById('status-hardware');
+      target.replaceChildren(statusBadge(status?.level || 'unknown'));
+      const issues = status?.issues || [];
+      target.parentElement.title = issues.length
+        ? issues.map((i) => `${i.label}: ${fmtMetric(i.metric, i.value)}`).join('\n')
+        : 'All hardware within limits - click for details';
+    }
+
+    function setHealthRange(minutes) {
+      healthRangeMs = minutes * 60 * 1000;
+      for (const m of [15, 60]) {
+        document.getElementById(`health-range-${m}`).className =
+          `px-3 py-1 rounded-lg text-xs font-medium transition ${m === minutes ? 'bg-sky-600 text-white' : 'bg-slate-900 text-slate-400 hover:text-slate-200'}`;
+      }
+      try { localStorage.setItem('healthRange', String(minutes)); } catch { /* ignore */ }
+      if (healthReport?.current) { renderHealthCharts(); renderHealthTable(); }
+    }
+
+    function renderHealth() {
+      const r = healthReport;
+      document.getElementById('health-overall').replaceChildren(statusBadge(r?.status?.level || 'unknown'));
+      const c = r?.current;
+      if (!c) {
+        document.getElementById('health-summary').textContent = 'Collecting the first samples (about 10 seconds)...';
+        return;
+      }
+      const issues = r.status.issues;
+      document.getElementById('health-summary').textContent = issues.length
+        ? `Under pressure now: ${issues.map((i) => `${i.label} ${fmtMetric(i.metric, i.value)}`).join(', ')}. Channel problems happening now may be caused by the hardware.`
+        : 'All hardware is within limits - channel problems right now are more likely the source or the network.';
+      renderHealthTiles(c);
+      renderHealthSources(r);
+      renderHealthCharts();
+      renderHealthTable();
+      renderCoreBars(c);
+      renderProcessTable(c);
+      renderNetworkTable(c);
+      renderIncidents(r.incidents);
+    }
+
+    function renderHealthTiles(c) {
+      const g = c.gpus[0];
+      const tiles = [
+        { metric: 'cpu', title: 'CPU', detail: `${c.cores.length} cores` },
+        { metric: 'maxCore', title: 'Busiest core', detail: 'Single-core bottleneck' },
+        { metric: 'memory', title: 'Memory', detail: `${fmtGB(c.memory.usedBytes)} of ${fmtGB(c.memory.totalBytes)}` },
+        { metric: 'gpu', title: 'GPU', detail: g ? `${g.name}${typeof g.tempC === 'number' ? ` · ${g.tempC}°C` : ''}` : 'No NVIDIA GPU data' },
+        { metric: 'encoder', title: 'Video encoder', detail: typeof g?.encoderSessions === 'number' ? `${g.encoderSessions} encode session(s)` : '' },
+        { metric: 'diskFree', title: 'Free disk', detail: c.disk ? `${fmtGB(c.disk.freeBytes)} free` : '' }
+      ];
+      document.getElementById('health-tiles').replaceChildren(...tiles.map((t) => {
+        const tile = el('div', 'border border-slate-700/50 rounded-lg p-3 min-w-0');
+        const head = el('div', 'flex items-center justify-between gap-2 mb-1');
+        head.append(el('span', 'text-xs text-slate-400 truncate', t.title), statusBadge(c.levels[t.metric] || 'unknown'));
+        const detail = el('div', 'text-xs text-slate-500 truncate', t.detail);
+        detail.title = t.detail;
+        tile.append(head, el('div', 'text-2xl font-semibold text-slate-100', fmtMetric(t.metric, c.metrics[t.metric])), detail);
+        return tile;
+      }));
+    }
+
+    function renderHealthSources(r) {
+      const notes = [];
+      if (r.sources.gpu === 'unavailable') notes.push('GPU load is not measured: no NVIDIA driver (nvidia-smi) found on this machine.');
+      else if (r.sources.gpu !== 'ok') notes.push(`GPU reader: ${r.sources.gpu}.`);
+      if (r.sources.processesAndNetwork === 'unavailable') notes.push('Process and network figures are only available on Windows.');
+      else if (r.sources.processesAndNetwork !== 'ok') notes.push(`Process and network reader: ${r.sources.processesAndNetwork}.`);
+      document.getElementById('health-sources').textContent = notes.join(' ');
+    }
+
+    function healthWindow() {
+      const end = healthHistory.length ? healthHistory[healthHistory.length - 1].t : Date.now();
+      const start = end - healthRangeMs;
+      return { start, end, points: healthHistory.filter((h) => h.t >= start) };
+    }
+
+    function renderHealthCharts() {
+      const box = document.getElementById('health-charts');
+      const { start, end, points } = healthWindow();
+      const twoCols = window.innerWidth >= 640;
+      const width = Math.max(220, Math.floor(twoCols ? (box.clientWidth - 16) / 2 : box.clientWidth));
+      box.replaceChildren(...HEALTH_CHARTS.map((def, i) => buildLineChart(def, i, points, start, end, width)));
+      // Restore the crosshair once the new charts are in the DOM.
+      box.querySelectorAll('svg').forEach((svg) => svg._restoreHover?.());
+    }
+
+    function buildLineChart(def, idx, points, start, end, W) {
+      const H = 130, padL = 36, padR = 48, padT = 8, padB = 20;
+      const plotW = W - padL - padR, plotH = H - padT - padB;
+      const card = el('div', 'min-w-0');
+      const head = el('div', 'flex items-baseline justify-between gap-2 mb-1');
+      head.append(el('h3', 'text-sm font-medium text-slate-300', def.title));
+      if (def.series.length > 1) {
+        const legend = el('div', 'flex gap-3 text-xs text-slate-400');
+        def.series.forEach((s, si) => {
+          const item = el('span', 'inline-flex items-center gap-1.5');
+          const key = el('span', 'inline-block w-3.5 h-0.5 rounded');
+          key.style.background = SERIES_COLORS[si];
+          item.append(key, document.createTextNode(s.label));
+          legend.append(item);
+        });
+        head.append(legend);
+      }
+      const wrap = el('div', 'relative');
+      card.append(head, wrap);
+
+      const values = points.flatMap((p) => def.series.map((s) => p[s.key])).filter((v) => typeof v === 'number');
+      const yMax = def.unit === '%' ? 100 : niceMax(Math.max(1, ...values));
+      const x = (t) => padL + ((t - start) / (end - start || 1)) * plotW;
+      const y = (v) => padT + plotH - (Math.min(Math.max(v, 0), yMax) / yMax) * plotH;
+      const svg = svgEl('svg', { width: W, height: H, viewBox: `0 0 ${W} ${H}`, class: 'block outline-none focus-visible:ring-2 focus-visible:ring-sky-500 rounded', role: 'img', tabindex: '0', 'aria-label': `${def.title}, last ${healthRangeMs / 60000} minutes. The table below has the same data.` });
+
+      for (const v of [0, yMax / 2, yMax]) {
+        svg.append(svgEl('line', { x1: padL, x2: padL + plotW, y1: y(v), y2: y(v), stroke: v === 0 ? 'var(--viz-axis)' : 'var(--viz-grid)', 'stroke-width': 1 }));
+        const tick = svgEl('text', { x: padL - 6, y: y(v) + 3, 'text-anchor': 'end', class: 'viz-tick' });
+        tick.textContent = fmtTick(v, def.unit);
+        svg.append(tick);
+      }
+      const threshold = def.threshold && healthReport?.thresholds?.[def.threshold]?.warning;
+      if (typeof threshold === 'number') {
+        svg.append(svgEl('line', { x1: padL, x2: padL + plotW, y1: y(threshold), y2: y(threshold), stroke: 'var(--status-warning)', 'stroke-width': 1, opacity: 0.6 }));
+      }
+      for (const [t, anchor, text] of [[start, 'start', fmtClock(start)], [end, 'end', 'now']]) {
+        const lbl = svgEl('text', { x: x(t), y: H - 5, 'text-anchor': anchor, class: 'viz-tick' });
+        lbl.textContent = text;
+        svg.append(lbl);
+      }
+
+      if (!values.length) {
+        const none = svgEl('text', { x: padL + plotW / 2, y: padT + plotH / 2, 'text-anchor': 'middle', class: 'viz-tick' });
+        none.textContent = 'No data';
+        svg.append(none);
+      }
+
+      // Lines break across missing samples instead of drawing a false bridge.
+      const gapMs = (healthReport?.sampleIntervalMs || 5000) * 3;
+      const endLabels = [];
+      def.series.forEach((s, si) => {
+        let d = '';
+        let prevT = null;
+        for (const p of points) {
+          const v = p[s.key];
+          if (typeof v !== 'number') { prevT = null; continue; }
+          d += `${prevT === null || p.t - prevT > gapMs ? 'M' : 'L'}${x(p.t).toFixed(1)},${y(v).toFixed(1)}`;
+          prevT = p.t;
+        }
+        if (d) svg.append(svgEl('path', { d, fill: 'none', stroke: SERIES_COLORS[si], 'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
+        const last = [...points].reverse().find((p) => typeof p[s.key] === 'number');
+        if (last) endLabels.push({ x: x(last.t) + 6, y: y(last[s.key]) + 4, text: fmtTick(last[s.key], def.unit) });
+      });
+      // Only the latest value is direct-labeled; keep two labels from overlapping.
+      if (endLabels.length === 2 && Math.abs(endLabels[0].y - endLabels[1].y) < 12) {
+        const [a, b] = endLabels[0].y <= endLabels[1].y ? endLabels : [endLabels[1], endLabels[0]];
+        b.y = a.y + 12;
+      }
+      for (const l of endLabels) {
+        const t = svgEl('text', { x: l.x, y: Math.min(l.y, padT + plotH + 4), class: 'viz-value' });
+        t.textContent = l.text;
+        svg.append(t);
+      }
+
+      const cross = svgEl('line', { y1: padT, y2: padT + plotH, stroke: 'var(--viz-muted)', 'stroke-width': 1, visibility: 'hidden' });
+      const dots = def.series.map((s, si) => svgEl('circle', { r: 4, fill: SERIES_COLORS[si], stroke: 'var(--viz-surface)', 'stroke-width': 2, visibility: 'hidden' }));
+      svg.append(cross, ...dots);
+      const tip = el('div', 'viz-tooltip hidden');
+      wrap.append(svg, tip);
+
+      const nearest = (t) => points.reduce((best, p) => (!best || Math.abs(p.t - t) < Math.abs(best.t - t) ? p : best), null);
+      const hide = () => {
+        cross.setAttribute('visibility', 'hidden');
+        dots.forEach((d) => d.setAttribute('visibility', 'hidden'));
+        tip.classList.add('hidden');
+        if (healthHover?.chart === idx) healthHover = null;
+      };
+      const show = (p) => {
+        if (!p) return hide();
+        const px = x(p.t);
+        cross.setAttribute('x1', px);
+        cross.setAttribute('x2', px);
+        cross.setAttribute('visibility', 'visible');
+        tip.replaceChildren();
+        def.series.forEach((s, si) => {
+          const v = p[s.key];
+          if (typeof v === 'number') {
+            dots[si].setAttribute('cx', px);
+            dots[si].setAttribute('cy', y(v));
+            dots[si].setAttribute('visibility', 'visible');
+          } else {
+            dots[si].setAttribute('visibility', 'hidden');
+          }
+          const row = el('div', 'flex items-center gap-2');
+          const key = el('span', 'inline-block w-3 h-0.5 rounded');
+          key.style.background = SERIES_COLORS[si];
+          row.append(key, el('strong', 'text-slate-100', fmtValue(v, def.unit)), el('span', 'text-slate-400', s.label));
+          tip.append(row);
+        });
+        tip.append(el('div', 'text-slate-500 mt-0.5', fmtClock(p.t, true)));
+        tip.classList.remove('hidden');
+        tip.style.left = `${px + 12 + tip.offsetWidth > W ? px - tip.offsetWidth - 12 : px + 12}px`;
+        tip.style.top = `${padT}px`;
+        healthHover = { chart: idx, t: p.t };
+      };
+      const tAt = (clientX) => {
+        const rect = svg.getBoundingClientRect();
+        return start + ((clientX - rect.left - padL) / plotW) * (end - start);
+      };
+      svg.addEventListener('pointermove', (e) => show(nearest(tAt(e.clientX))));
+      svg.addEventListener('pointerleave', hide);
+      svg.addEventListener('focus', () => show(points[points.length - 1]));
+      svg.addEventListener('blur', hide);
+      svg.addEventListener('keydown', (e) => {
+        if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+        e.preventDefault();
+        const i = points.findIndex((p) => p.t === healthHover?.t);
+        const from = i < 0 ? points.length - 1 : i;
+        show(points[Math.max(0, Math.min(points.length - 1, from + (e.key === 'ArrowLeft' ? -1 : 1)))]);
+      });
+      svg._restoreHover = () => { if (healthHover?.chart === idx) show(nearest(healthHover.t)); };
+      return card;
+    }
+
+    // Table twin of the charts: one row per minute, peak values, newest first.
+    function renderHealthTable() {
+      const details = document.getElementById('health-table-details');
+      if (!details.open || !healthReport?.current) return;
+      const { points } = healthWindow();
+      const byMinute = new Map();
+      for (const p of points) {
+        const m = Math.floor(p.t / 60000) * 60000;
+        if (!byMinute.has(m)) byMinute.set(m, []);
+        byMinute.get(m).push(p);
+      }
+      const cols = [['cpu', 'CPU', '%'], ['maxCore', 'Busiest core', '%'], ['memory', 'Memory', '%'], ['gpu', 'GPU', '%'], ['encoder', 'Encoder', '%'], ['rxMbps', 'In', 'Mb/s'], ['txMbps', 'Out', 'Mb/s']];
+      const table = el('table', 'viz-table w-full text-xs');
+      const thead = el('thead');
+      const hr = el('tr', 'text-slate-400 text-left');
+      hr.append(el('th', 'py-1 pr-3 font-medium', 'Minute'));
+      for (const [, label] of cols) hr.append(el('th', 'py-1 pr-3 font-medium text-right', label));
+      thead.append(hr);
+      const tbody = el('tbody');
+      for (const [m, ps] of [...byMinute].reverse()) {
+        const tr = el('tr', 'border-t border-slate-700/50 text-slate-300');
+        tr.append(el('td', 'py-1 pr-3', fmtClock(m)));
+        for (const [key, , unit] of cols) {
+          const vals = ps.map((p) => p[key]).filter((v) => typeof v === 'number');
+          tr.append(el('td', 'py-1 pr-3 text-right', vals.length ? fmtValue(Math.max(...vals), unit) : '–'));
+        }
+        tbody.append(tr);
+      }
+      table.append(thead, tbody);
+      document.getElementById('health-table').replaceChildren(table);
+    }
+
+    function renderCoreBars(c) {
+      document.getElementById('health-cpu-model').textContent = c.cpuModel || '';
+      const box = document.getElementById('health-cores');
+      const cores = c.cores;
+      const W = Math.max(220, box.clientWidth), H = 120, padL = 36, padR = 4, padT = 6, padB = 18;
+      const plotW = W - padL - padR, plotH = H - padT - padB;
+      const gap = 2;
+      const slot = plotW / Math.max(1, cores.length);
+      const bw = Math.max(2, slot - gap);
+      const y = (v) => padT + plotH - (Math.min(Math.max(v, 0), 100) / 100) * plotH;
+      const svg = svgEl('svg', { width: W, height: H, viewBox: `0 0 ${W} ${H}`, class: 'block', role: 'img', 'aria-label': `Load on each of ${cores.length} CPU cores` });
+      for (const v of [0, 50, 100]) {
+        svg.append(svgEl('line', { x1: padL, x2: padL + plotW, y1: y(v), y2: y(v), stroke: v === 0 ? 'var(--viz-axis)' : 'var(--viz-grid)', 'stroke-width': 1 }));
+        const tick = svgEl('text', { x: padL - 6, y: y(v) + 3, 'text-anchor': 'end', class: 'viz-tick' });
+        tick.textContent = `${v}%`;
+        svg.append(tick);
+      }
+      const warn = healthReport?.thresholds?.maxCore?.warning;
+      if (typeof warn === 'number') svg.append(svgEl('line', { x1: padL, x2: padL + plotW, y1: y(warn), y2: y(warn), stroke: 'var(--status-warning)', 'stroke-width': 1, opacity: 0.6 }));
+
+      const tip = el('div', 'viz-tooltip hidden');
+      const labelEvery = bw >= 12 ? 1 : bw >= 5 ? 4 : 8;
+      cores.forEach((v, i) => {
+        const bx = padL + i * slot + gap / 2;
+        const top = y(v);
+        const h = padT + plotH - top;
+        const r = Math.min(4, bw / 2, h);
+        let bar = null;
+        if (h >= 0.5) {
+          bar = svgEl('path', { d: `M${bx},${top + h}V${top + r}Q${bx},${top} ${bx + r},${top}H${bx + bw - r}Q${bx + bw},${top} ${bx + bw},${top + r}V${top + h}Z`, fill: 'var(--series-1)' });
+          svg.append(bar);
+        }
+        if (i % labelEvery === 0) {
+          const lbl = svgEl('text', { x: bx + bw / 2, y: H - 4, 'text-anchor': 'middle', class: 'viz-tick' });
+          lbl.textContent = String(i);
+          svg.append(lbl);
+        }
+        // Hit area is the whole column, not just the painted bar.
+        const hit = svgEl('rect', { x: padL + i * slot, y: padT, width: slot, height: plotH, fill: 'transparent' });
+        hit.addEventListener('pointerenter', () => {
+          bar?.setAttribute('fill', 'var(--series-1-hover)');
+          tip.replaceChildren(el('strong', 'text-slate-100', `${Math.round(v)}%`), document.createTextNode(' '), el('span', 'text-slate-400', `Core ${i}`));
+          tip.classList.remove('hidden');
+          const cx = bx + bw / 2;
+          tip.style.left = `${Math.min(Math.max(cx - tip.offsetWidth / 2, 0), W - tip.offsetWidth)}px`;
+          tip.style.top = `${Math.max(0, top - 30)}px`;
+        });
+        hit.addEventListener('pointerleave', () => {
+          bar?.setAttribute('fill', 'var(--series-1)');
+          tip.classList.add('hidden');
+        });
+        svg.append(hit);
+      });
+      const list = el('p', 'sr-only', `Core loads: ${cores.map((v, i) => `core ${i} ${Math.round(v)}%`).join(', ')}`);
+      box.replaceChildren(svg, tip, list);
+    }
+
+    function simpleTable(headers, rows) {
+      const table = el('table', 'viz-table w-full text-sm');
+      const hr = el('tr', 'text-slate-400 text-xs text-left');
+      headers.forEach((h, i) => hr.append(el('th', `py-1.5 pr-3 font-medium ${i ? 'text-right' : ''}`, h)));
+      const thead = el('thead');
+      thead.append(hr);
+      const tbody = el('tbody');
+      for (const row of rows) {
+        const tr = el('tr', 'border-t border-slate-700/50 text-slate-300');
+        row.forEach((cell, i) => tr.append(el('td', `py-1.5 pr-3 ${i ? 'text-right' : ''}`, cell)));
+        tbody.append(tr);
+      }
+      table.append(thead, tbody);
+      return table;
+    }
+
+    function renderProcessTable(c) {
+      const p = c.processes || {};
+      const rows = [
+        ['CasparCG (incl. graphics helpers)', p.casparcg],
+        ['MediaMTX', p.mediamtx],
+        ['ffmpeg', p.ffmpeg],
+        ['Dashboard', p.dashboard]
+      ]
+        .filter(([name, info]) => info && (info.count > 0 || name === 'Dashboard'))
+        .map(([name, info]) => [name, String(info.count), typeof info.cpu === 'number' ? `${info.cpu.toFixed(1)}%` : '–', fmtGB(info.memoryBytes)]);
+      const box = document.getElementById('health-processes');
+      box.replaceChildren(simpleTable(['Process', 'Running', 'CPU (share of machine)', 'Memory'], rows));
+      if (!p.casparcg) box.append(el('p', 'text-xs text-slate-500 mt-2', 'CasparCG / MediaMTX figures appear after the first two samples.'));
+    }
+
+    function renderNetworkTable(c) {
+      const box = document.getElementById('health-network');
+      const nics = [...(c.network || [])].sort((a, b) => ((b.rxMbps || 0) + (b.txMbps || 0)) - ((a.rxMbps || 0) + (a.txMbps || 0)));
+      if (!nics.length) { box.replaceChildren(el('p', 'text-sm text-slate-500', 'No network data yet.')); return; }
+      box.replaceChildren(simpleTable(
+        ['Adapter', 'In', 'Out', 'Link', 'Link load'],
+        nics.map((n) => [n.name, fmtValue(n.rxMbps, 'Mb/s'), fmtValue(n.txMbps, 'Mb/s'), n.speedMbps ? `${n.speedMbps >= 1000 ? `${n.speedMbps / 1000} Gb/s` : `${n.speedMbps} Mb/s`}` : '–', typeof n.loadPct === 'number' ? `${n.loadPct}%` : '–'])
+      ));
+    }
+
+    function renderIncidents(list) {
+      const box = document.getElementById('health-incidents');
+      if (!list.length) { box.replaceChildren(el('p', 'text-sm text-slate-500', 'No incidents since the dashboard started.')); return; }
+      box.replaceChildren(...list.slice(0, 50).map((inc) => {
+        const v = VERDICTS[inc.verdict] || VERDICTS.unknown;
+        const row = el('div', 'border border-slate-700/50 rounded-lg p-3');
+        const top = el('div', 'flex items-start justify-between gap-3 mb-1');
+        const title = el('div', 'text-sm font-medium text-slate-200', INCIDENT_TYPES[inc.type] || inc.type);
+        if (inc.channel) title.append(el('span', 'text-slate-400 font-normal', ` · ${inc.channel}`));
+        top.append(title, statusBadge(v.level, v.label));
+        const peaks = [['CPU', inc.peaks.cpu], ['busiest core', inc.peaks.maxCore], ['memory', inc.peaks.memory], ['GPU', inc.peaks.gpu], ['encoder', inc.peaks.encoder]]
+          .filter(([, val]) => typeof val === 'number')
+          .map(([label, val]) => `${label} ${Math.round(val)}%`)
+          .join(' · ');
+        row.append(
+          top,
+          el('p', 'text-sm text-slate-300', inc.message),
+          el('p', 'text-xs text-slate-400 mt-1', `${fmtClock(inc.at, true)} - ${v.text}`),
+          el('p', 'text-xs text-slate-500 mt-0.5', peaks ? `Peak in the minute before: ${peaks}` : '')
+        );
+        return row;
+      }));
+    }
+
+    let initialHealthRange = 15;
+    try { if (localStorage.getItem('healthRange') === '60') initialHealthRange = 60; } catch { /* ignore */ }
+    setHealthRange(initialHealthRange);
+    let healthResizeTimer = null;
+    window.addEventListener('resize', () => {
+      clearTimeout(healthResizeTimer);
+      healthResizeTimer = setTimeout(() => {
+        if (!document.getElementById('tab-panel-health').classList.contains('hidden')) renderHealth();
+      }, 150);
+    });
 
     // Restore whichever tab was open last for this browser, defaulting to Channels.
     let initialMainTab = 'channels';
@@ -1270,6 +1972,10 @@
     setInterval(loadCloudStreams, 15000);
     pollCloudVmStatus();
     setInterval(pollCloudVmStatus, 15000);
+
+    // Every 5s to match the server's sampling; only new points are sent.
+    pollHealth();
+    setInterval(pollHealth, 5000);
   </script>
 </body>
 </html>

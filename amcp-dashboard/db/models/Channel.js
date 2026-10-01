@@ -3,16 +3,16 @@ const sequelize = require('../sequelize');
 
 // One "Channel" is a saved broadcast profile: a name, an output target, and
 // (via association) its own ordered list of input Sources and BrandingPresets.
-// Only one Channel is ever "active" at a time - the CasparCG server in this
-// setup has a single physical channel/consumer chain, so this models
-// switchable profiles rather than simultaneous multi-channel output.
+// Any number of Channels can be "active" (on air) at once, each rendered on
+// its own CasparCG channel - two on-air Channels may never share a
+// casparChannelNumber, and every number used must exist in casparcg.config.
 const Channel = sequelize.define('Channel', {
   name: { type: DataTypes.STRING, allowNull: false },
   casparChannelNumber: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 1 },
   // Output target for the RTMP push consumer. Kept as TEXT, not a typed URL
   // field, since output targets can be RTMP now and something else later.
   rtmpTarget: { type: DataTypes.TEXT, allowNull: false },
-  isActive: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false }
+  isActive: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false } // on air
 });
 
 module.exports = Channel;
