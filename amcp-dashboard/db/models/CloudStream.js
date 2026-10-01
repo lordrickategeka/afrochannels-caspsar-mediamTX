@@ -14,7 +14,18 @@ const CloudStream = sequelize.define('CloudStream', {
   // http(s)://. Kept as TEXT/unvalidated-by-type, same reasoning as
   // Source.url - the dashboard doesn't need to know which protocol this is,
   // vm-control.js only checks it's shell-safe.
-  sourceUrl: { type: DataTypes.TEXT, allowNull: false }
+  sourceUrl: { type: DataTypes.TEXT, allowNull: false },
+  // Program number within the primary's transport stream (udp:// multicast
+  // carrying several TV services), or null to let ffmpeg pick.
+  program: { type: DataTypes.INTEGER, allowNull: true },
+  // Backups tried in order when the primary stops: [{ url, program }].
+  // All publish to the same path, so the HLS link never changes.
+  backupSources: { type: DataTypes.JSON, allowNull: false, defaultValue: [] }
 });
+
+/** Every source in priority order - primary first - as vm-control expects them. */
+CloudStream.prototype.allSources = function allSources() {
+  return [{ url: this.sourceUrl, program: this.program }, ...(this.backupSources || [])];
+};
 
 module.exports = CloudStream;

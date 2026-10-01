@@ -241,6 +241,11 @@
             <input type="text" id="cs-name" placeholder="Stream name" required class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-slate-100 text-sm focus:outline-none focus:border-sky-500 transition">
             <input type="text" id="cs-source-url" placeholder="udp://239.1.1.1:1234, srt://host:port, rtmp://host/app, rtsp://host/path, https://host/stream.m3u8 ..." required class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-slate-100 text-sm font-mono focus:outline-none focus:border-sky-500 transition">
             <input type="number" id="cs-program" min="0" placeholder="Program # (only for a udp:// multicast that bundles several TV services - leave blank otherwise)" class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-slate-100 text-sm font-mono focus:outline-none focus:border-sky-500 transition">
+            <!-- Backup sources: tried in order when the primary stops, all on
+                 the same HLS link. Rows added by addBackupSourceRow(). -->
+            <div id="cs-backups" class="space-y-2"></div>
+            <button type="button" onclick="addBackupSourceRow(document.getElementById('cs-backups'))" class="text-sky-400 hover:text-sky-300 text-xs font-medium">+ Add backup source</button>
+            <p class="text-xs text-slate-500">If the primary stops, the stream switches to the first working backup within about 10 seconds, on the same HLS link, and goes back to the primary once it has been healthy for a minute.</p>
             <div class="flex gap-2 pt-2">
               <button onclick="createCloudStream(this)" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-medium flex-1 transition">Create</button>
               <button onclick="toggleNewCloudStreamForm()" class="bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-lg text-sm font-medium flex-1 transition">Cancel</button>
@@ -1287,7 +1292,7 @@
       } catch (err) {
         return; // VM/dashboard hiccup - leave the existing list showing rather than blanking it
       }
-      renderCloudStreamList();
+      if (!cloudEditorOpen) renderCloudStreamList();
     }
 
     function renderCloudStreamList() {
@@ -1306,23 +1311,127 @@
           <div class="min-w-0 flex-1">
             <div class="text-sm font-medium text-slate-200 flex items-center gap-2">
               <span class="w-2 h-2 rounded-full ${dotClass}" title="${statusTitle}"></span>
-              ${s.name}
+              <span class="cs-name"></span>
             </div>
-            <div class="text-xs text-slate-500 font-mono break-all">${s.sourceUrl}</div>
+            <div class="cs-sources space-y-0.5 mt-0.5"></div>
             <div class="text-xs text-sky-400 font-mono break-all select-all mt-0.5">${s.hlsUrls?.lan ?? s.hlsUrl}</div>
             ${s.hlsUrls?.tailscale ? `<div class="text-xs text-violet-400 font-mono break-all select-all mt-0.5"><span class="text-slate-500">Tailscale:</span> ${s.hlsUrls.tailscale}</div>` : ''}
           </div>
-          <div class="flex gap-2 shrink-0">
+          <div class="flex gap-2 shrink-0 flex-wrap justify-end">
             <button class="btn-preview bg-violet-600 hover:bg-violet-700 text-white px-3 py-1.5 rounded-lg text-xs font-medium transition">Preview</button>
             <button class="btn-toggle bg-amber-600 hover:bg-amber-700 text-white px-3 py-1.5 rounded-lg text-xs font-medium transition">${s.running === false ? 'Start' : 'Stop'}</button>
+            <button class="btn-sources text-sky-400 hover:text-sky-300 text-xs font-medium">Edit sources</button>
             <button class="btn-delete text-red-400 hover:text-red-300 text-xs font-medium">Delete</button>
           </div>`;
-        const [previewBtn, toggleBtn, deleteBtn] = row.querySelectorAll('button');
-        previewBtn.onclick = () => previewCloudStream(s);
+        row.querySelector('.cs-name').textContent = s.name;
+        renderCloudSourceList(row.querySelector('.cs-sources'), s);
+        row.querySelector('.btn-preview').onclick = () => previewCloudStream(s);
+        const toggleBtn = row.querySelector('.btn-toggle');
         toggleBtn.onclick = () => toggleCloudStream(s, toggleBtn);
+        row.querySelector('.btn-sources').onclick = () => openCloudSourceEditor(row, s);
+        const deleteBtn = row.querySelector('.btn-delete');
         deleteBtn.onclick = () => deleteCloudStream(s.id, deleteBtn);
         container.appendChild(row);
       }
+    }
+
+    // Primary + backups, with the one playing right now marked.
+    function renderCloudSourceList(box, s) {
+      const sources = [{ url: s.sourceUrl, program: s.program }, ...(s.backupSources || [])];
+      // Containers created before backups existed report no active source;
+      // they only ever had the primary.
+      const active = s.running ? (s.activeSource ?? 0) : null;
+      sources.forEach((src, i) => {
+        const line = el('div', 'text-xs font-mono break-all flex items-baseline gap-1.5');
+        const label = el('span', 'shrink-0 font-sans', i === 0 ? 'Primary' : `Backup ${i}`);
+        label.className += i === active ? ' text-emerald-400 font-semibold' : ' text-slate-500';
+        line.append(label, el('span', i === active ? 'text-slate-300' : 'text-slate-500', src.url + (src.program !== null && src.program !== undefined ? `  (program ${src.program})` : '')));
+        if (i === active) line.append(el('span', 'shrink-0 font-sans text-emerald-400', sources.length > 1 ? '● live' : ''));
+        box.append(line);
+      });
+      if (active !== null && active > 0) {
+        box.append(el('div', 'text-xs text-amber-400', 'Running on a backup - it switches back once the primary has been healthy for a minute.'));
+      }
+    }
+
+    // One URL + program row for a backup source, in the create form or editor.
+    function addBackupSourceRow(container, source = {}) {
+      const row = el('div', 'cs-backup-row flex gap-2');
+      const url = el('input', 'cs-backup-url flex-1 min-w-0 bg-slate-900 border border-slate-700 rounded-lg p-2 text-slate-100 text-sm font-mono focus:outline-none focus:border-sky-500 transition');
+      url.type = 'text';
+      url.placeholder = `Backup ${container.children.length + 1} URL (udp://, srt://, rtmp://, rtsp://, https://...)`;
+      url.value = source.url || '';
+      const program = el('input', 'cs-backup-program w-24 shrink-0 bg-slate-900 border border-slate-700 rounded-lg p-2 text-slate-100 text-sm font-mono focus:outline-none focus:border-sky-500 transition');
+      program.type = 'number';
+      program.min = '0';
+      program.placeholder = 'Program';
+      program.title = 'Program # inside a multi-service udp:// multicast - leave blank otherwise';
+      program.value = source.program ?? '';
+      const remove = el('button', 'text-slate-500 hover:text-red-400 text-sm px-2 shrink-0', '×');
+      remove.type = 'button';
+      remove.title = 'Remove this backup';
+      remove.onclick = () => row.remove();
+      row.append(url, program, remove);
+      container.append(row);
+    }
+
+    function readBackupRows(container) {
+      return [...container.querySelectorAll('.cs-backup-row')]
+        .map((row) => ({ url: row.querySelector('.cs-backup-url').value.trim(), program: row.querySelector('.cs-backup-program').value }))
+        .filter((b) => b.url)
+        .map((b) => ({ url: b.url, program: b.program === '' ? null : Number(b.program) }));
+    }
+
+    // While an editor is open, the 15s list refresh is held off so it doesn't
+    // wipe out what the operator is typing.
+    let cloudEditorOpen = false;
+
+    function openCloudSourceEditor(row, s) {
+      cloudEditorOpen = true;
+      const editor = el('div', 'w-full space-y-2');
+      editor.append(el('div', 'text-sm font-medium text-slate-200', `Sources for "${s.name}"`));
+      const primaryRow = el('div', 'flex gap-2');
+      const primaryUrl = el('input', 'flex-1 min-w-0 bg-slate-900 border border-slate-700 rounded-lg p-2 text-slate-100 text-sm font-mono focus:outline-none focus:border-sky-500 transition');
+      primaryUrl.type = 'text';
+      primaryUrl.required = true;
+      primaryUrl.placeholder = 'Primary URL';
+      primaryUrl.value = s.sourceUrl;
+      const primaryProgram = el('input', 'w-24 shrink-0 bg-slate-900 border border-slate-700 rounded-lg p-2 text-slate-100 text-sm font-mono focus:outline-none focus:border-sky-500 transition');
+      primaryProgram.type = 'number';
+      primaryProgram.min = '0';
+      primaryProgram.placeholder = 'Program';
+      primaryProgram.value = s.program ?? '';
+      primaryRow.append(primaryUrl, primaryProgram);
+      const backups = el('div', 'space-y-2');
+      for (const b of s.backupSources || []) addBackupSourceRow(backups, b);
+      const addBtn = el('button', 'text-sky-400 hover:text-sky-300 text-xs font-medium', '+ Add backup source');
+      addBtn.type = 'button';
+      addBtn.onclick = () => addBackupSourceRow(backups);
+      const note = el('p', 'text-xs text-amber-400', 'Saving restarts this stream: the HLS link stays the same, but viewers see a gap of a few seconds.');
+      const actions = el('div', 'flex gap-2');
+      const save = el('button', 'bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-medium flex-1 transition', 'Save & restart');
+      const cancel = el('button', 'bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-lg text-sm font-medium flex-1 transition', 'Cancel');
+      cancel.onclick = () => { cloudEditorOpen = false; renderCloudStreamList(); };
+      save.onclick = () => {
+        if (!primaryUrl.reportValidity()) return;
+        withLoading(save, async () => {
+          try {
+            const body = {
+              sourceUrl: primaryUrl.value.trim(),
+              program: primaryProgram.value === '' ? null : Number(primaryProgram.value),
+              backupSources: readBackupRows(backups)
+            };
+            await api(`/api/cloud-streams/${s.id}`, { method: 'PUT', body: JSON.stringify(body) });
+            log(`Sources for "${s.name}" saved - primary + ${body.backupSources.length} backup(s)`, 'success');
+            cloudEditorOpen = false;
+            await loadCloudStreams();
+          } catch (err) { log(`Error: ${err.message}`, 'error'); }
+        });
+      };
+      actions.append(save, cancel);
+      editor.append(el('div', 'text-xs text-slate-500', 'Primary'), primaryRow, el('div', 'text-xs text-slate-500', 'Backups, tried in order'), backups, addBtn, note, actions);
+      row.replaceChildren(editor);
+      primaryUrl.focus();
     }
 
     function toggleNewCloudStreamForm() {
@@ -1336,6 +1445,7 @@
       const sourceUrl = sourceUrlInput.value;
       const programRaw = document.getElementById('cs-program').value;
       const program = programRaw === '' ? undefined : Number(programRaw);
+      const backupSources = readBackupRows(document.getElementById('cs-backups'));
       // The button is a plain onclick, not a <form> submit, so the "required"
       // attribute on these inputs does nothing on its own - reportValidity()
       // is what actually triggers the browser's native highlight + tooltip.
@@ -1345,12 +1455,14 @@
 
       await withLoading(btn, async () => {
         try {
-          const stream = await api('/api/cloud-streams', { method: 'POST', body: JSON.stringify({ name, sourceUrl, program }) });
+          const stream = await api('/api/cloud-streams', { method: 'POST', body: JSON.stringify({ name, sourceUrl, program, backupSources }) });
           const tsNote = stream.hlsUrls?.tailscale ? ` | Tailscale: ${stream.hlsUrls.tailscale}` : '';
-          log(`Cloud stream "${name}" started - HLS: ${stream.hlsUrl}${tsNote}`, 'success');
+          const backupNote = backupSources.length ? ` with ${backupSources.length} backup(s)` : '';
+          log(`Cloud stream "${name}" started${backupNote} - HLS: ${stream.hlsUrl}${tsNote}`, 'success');
           document.getElementById('cs-name').value = '';
           document.getElementById('cs-source-url').value = '';
           document.getElementById('cs-program').value = '';
+          document.getElementById('cs-backups').replaceChildren();
           toggleNewCloudStreamForm();
         } catch (err) { log(`Error: ${err.message}`, 'error'); }
         await loadCloudStreams();
@@ -1417,22 +1529,35 @@
 
     // Attaches hls.js to a <video>, given one or more candidate URLs for the
     // SAME stream reached over different network paths (e.g. a LAN address
-    // and a Tailscale address for the same MediaMTX). On a fatal error it
-    // advances to the next candidate rather than only retrying the one that
-    // just failed - this only helps when the browser running it can actually
-    // reach every candidate itself (an admin's own machine on both networks,
-    // say); it can't make an address reachable to a viewer whose network
-    // genuinely has no route to it. Wraps back to the first candidate after
-    // the last, so if every path is down it keeps retrying instead of giving
-    // up.
+    // and a Tailscale address for the same MediaMTX). This only helps when the
+    // browser can actually reach a candidate; it can't make an address
+    // reachable to a viewer whose network has no route to it.
+    //
+    // Tuned to ride out the brief dropouts seen on the Tailscale path rather
+    // than visibly break on each one:
+    // - The candidate on the same host as this page goes first (a page opened
+    //   via the Tailscale address can reach the Tailscale HLS link).
+    // - Once a candidate has played, a hiccup retries THAT one a few times
+    //   before moving on. Rotating straight to the next address meant waiting
+    //   out a timeout on a link this browser may not reach at all.
+    // - Low-latency mode is off: the server publishes LL-HLS, but polling its
+    //   200ms parts falls behind on a slow remote path. Whole 2s segments are
+    //   far more forgiving, at the cost of a few seconds' extra delay, which
+    //   is fine for a preview.
+    // - Media errors are recovered in place instead of reloading.
     //
     // Only touches the hls.js instance it owns, never the <video>'s own
     // "playing"/"waiting" listeners - those are the caller's to manage, since
     // a persistent video element (like the main preview below) must register
     // them exactly once, not once per call. Returns a handle with .destroy().
+    const SAME_URL_RETRIES = 3;
+
     function attachHlsWithFailover(videoEl, urls, onFatalError) {
-      const candidates = (Array.isArray(urls) ? urls : [urls]).filter(Boolean);
+      const candidates = (Array.isArray(urls) ? urls : [urls]).filter(Boolean)
+        .sort((a, b) => Number(new URL(b).hostname === location.hostname) - Number(new URL(a).hostname === location.hostname));
       let index = 0;
+      let goodIndex = null; // a candidate that has delivered video
+      let retriesOnGood = 0;
       let inst = null;
       let retryTimer = null;
 
@@ -1442,14 +1567,34 @@
       }
 
       if (window.Hls && Hls.isSupported()) {
-        inst = new Hls({ liveSyncDurationCount: 3 });
+        inst = new Hls({
+          lowLatencyMode: false,
+          liveSyncDurationCount: 3,
+          liveMaxLatencyDurationCount: 10,
+          manifestLoadingMaxRetry: 4,
+          levelLoadingMaxRetry: 6,
+          fragLoadingMaxRetry: 6
+        });
         inst.attachMedia(videoEl);
+        inst.on(Hls.Events.FRAG_LOADED, () => {
+          goodIndex = index;
+          retriesOnGood = 0;
+        });
         inst.on(Hls.Events.ERROR, (_evt, data) => {
           if (!data.fatal) return;
+          if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+            inst.recoverMediaError();
+            return;
+          }
           onFatalError?.();
-          index = (index + 1) % candidates.length;
+          if (index === goodIndex && retriesOnGood < SAME_URL_RETRIES) {
+            retriesOnGood += 1;
+          } else {
+            index = (index + 1) % candidates.length;
+            retriesOnGood = 0;
+          }
           clearTimeout(retryTimer);
-          retryTimer = setTimeout(loadCurrent, 4000);
+          retryTimer = setTimeout(loadCurrent, 3000);
         });
       } else if (!videoEl.canPlayType('application/vnd.apple.mpegurl')) {
         onFatalError?.('HLS playback not supported in this browser.');

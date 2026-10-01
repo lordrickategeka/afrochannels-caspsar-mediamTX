@@ -7,6 +7,7 @@ const session = require('express-session');
 const bcrypt = require('bcrypt');
 const multer = require('multer');
 const { CasparCG } = require('casparcg-connection');
+const { DataTypes } = require('sequelize');
 const { sequelize, User, Channel, Source, BrandingPreset, CloudStream } = require('./db/models');
 const procManager = require('./process-manager');
 const vmControl = require('./vm-control');
@@ -914,38 +915,101 @@ app.get('/api/cloud-streams', requireCloudStreams, async (req, res) => {
   } catch (err) {
     console.error('[CloudStream] Could not reach VM for status:', err.message);
   }
-  res.json(streams.map((s) => ({
-    ...s.toJSON(),
-    // hlsUrl kept for anything already reading it; hlsUrls carries both
-    // variants (lan always, tailscale only if MEDIAMTX_HLS_BASE_TAILSCALE
-    // is configured - see vm-control.js).
-    hlsUrl: vmControl.hlsUrl(s.slug),
-    hlsUrls: vmControl.hlsUrls(s.slug),
-    running: s.slug in statusBySlug ? statusBySlug[s.slug] : null
-  })));
+  res.json(streams.map((s) => {
+    const status = statusBySlug[s.slug];
+    return {
+      ...s.toJSON(),
+      // hlsUrl kept for anything already reading it; hlsUrls carries both
+      // variants (lan always, tailscale only if MEDIAMTX_HLS_BASE_TAILSCALE
+      // is configured - see vm-control.js).
+      hlsUrl: vmControl.hlsUrl(s.slug),
+      hlsUrls: vmControl.hlsUrls(s.slug),
+      running: status ? status.running : null,
+      // Index into [primary, ...backupSources] of what's playing now; null
+      // if unknown (VM unreachable, stopped, or created before backups).
+      activeSource: status ? status.activeSource : null
+    };
+  }));
 });
+
+function toProgram(p) {
+  return p === undefined || p === null || p === '' ? null : Number(p);
+}
+
+/**
+ * Pulls the primary and backups out of a create/update body, validated
+ * (shell-safe URLs, numeric programs) before anything touches the VM or the
+ * database - a bad value is the caller's mistake, so it's a 400.
+ */
+function readCloudSources(body) {
+  const { sourceUrl, program, backupSources = [] } = body || {};
+  if (!sourceUrl) throw httpError(400, '"sourceUrl" is required');
+  if (!Array.isArray(backupSources)) throw httpError(400, '"backupSources" must be a list of { url, program }');
+  const primary = { url: sourceUrl, program: toProgram(program) };
+  const backups = backupSources.filter((b) => b && b.url).map((b) => ({ url: b.url, program: toProgram(b.program) }));
+  try {
+    vmControl.normalizeSources([primary, ...backups]);
+  } catch (err) {
+    throw httpError(400, err.message);
+  }
+  return { sources: [primary, ...backups], primary, backups };
+}
 
 /**
  * POST /api/cloud-streams
- * Body: { name, sourceUrl, program? } - sourceUrl may be udp://, srt://,
- * rtmp(s)://, rtsp://, or http(s)://. "program" is optional and only
- * meaningful for a udp:// source that bundles several TV services into one
- * multicast address - see the comment on vm-control.js's startIngest().
+ * Body: { name, sourceUrl, program?, backupSources?: [{ url, program? }] }
+ * Sources may be udp://, srt://, rtmp(s)://, rtsp://, or http(s)://.
+ * "program" only matters for a udp:// source that bundles several TV services
+ * into one multicast address - see vm-control.js's startIngest(). Backups are
+ * tried in order when the primary stops, all on the same HLS link.
  * Starts the VM-side ingest first and only saves the record if that
  * succeeds, so there's never a saved stream with no actual container behind it.
  */
 app.post('/api/cloud-streams', requireCloudStreams, async (req, res) => {
-  const { name, sourceUrl, program } = req.body || {};
-  if (!name || !sourceUrl) return res.status(400).json({ status: 'error', message: '"name" and "sourceUrl" are required' });
+  const { name } = req.body || {};
+  if (!name) return res.status(400).json({ status: 'error', message: '"name" is required' });
   try {
+    const { sources, primary, backups } = readCloudSources(req.body);
     const slug = await generateCloudSlug(name);
-    await vmControl.startIngest(slug, sourceUrl, program);
-    const stream = await CloudStream.create({ name, slug, sourceUrl });
-    console.log(`[CloudStream] Started ingest "${name}" (${slug}) -> ${vmControl.hlsUrl(slug)}`);
+    await vmControl.startIngest(slug, sources);
+    const stream = await CloudStream.create({
+      name,
+      slug,
+      sourceUrl: primary.url,
+      program: primary.program,
+      backupSources: backups
+    });
+    console.log(`[CloudStream] Started ingest "${name}" (${slug}) with ${backups.length} backup(s) -> ${vmControl.hlsUrl(slug)}`);
     res.json({ ...stream.toJSON(), hlsUrl: vmControl.hlsUrl(slug), hlsUrls: vmControl.hlsUrls(slug) });
   } catch (err) {
     console.error('[CloudStream] Failed to start ingest:', err.message);
-    res.status(500).json({ status: 'error', message: err.message });
+    res.status(err.status || 500).json({ status: 'error', message: err.message });
+  }
+});
+
+/**
+ * PUT /api/cloud-streams/:id
+ * Body: { sourceUrl, program?, backupSources?: [{ url, program? }] }
+ * Replaces the stream's sources and recreates its container, keeping the
+ * same name, slug and HLS link. Viewers see a short gap (a few seconds) while
+ * the new container starts. The record is only updated if that succeeds.
+ */
+app.put('/api/cloud-streams/:id', requireCloudStreams, async (req, res) => {
+  const stream = await CloudStream.findByPk(req.params.id);
+  if (!stream) return res.status(404).json({ status: 'error', message: 'Stream not found' });
+  try {
+    const { sources, primary, backups } = readCloudSources(req.body);
+    await vmControl.startIngest(stream.slug, sources);
+    await stream.update({
+      sourceUrl: primary.url,
+      program: primary.program,
+      backupSources: backups
+    });
+    console.log(`[CloudStream] Updated sources for "${stream.name}" (${stream.slug}): primary + ${backups.length} backup(s)`);
+    res.json({ ...stream.toJSON(), hlsUrl: vmControl.hlsUrl(stream.slug), hlsUrls: vmControl.hlsUrls(stream.slug) });
+  } catch (err) {
+    console.error('[CloudStream] Failed to update sources:', err.message);
+    res.status(err.status || 500).json({ status: 'error', message: err.message });
   }
 });
 
@@ -966,7 +1030,7 @@ app.post('/api/cloud-streams/:id/stop', requireCloudStreams, async (req, res) =>
 /**
  * POST /api/cloud-streams/:id/start
  * Resumes a previously-stopped ingest container (does not recreate it - use
- * DELETE then re-create the stream if the UDP source itself changed).
+ * PUT /api/cloud-streams/:id to change its sources).
  */
 app.post('/api/cloud-streams/:id/start', requireCloudStreams, async (req, res) => {
   const stream = await CloudStream.findByPk(req.params.id);
@@ -1226,8 +1290,36 @@ function listen() {
   });
 }
 
+// The dashboard never runs sequelize.sync() on an existing database (that's
+// seed.js's job on a fresh one), so columns added to a model later are
+// added here, once, without touching existing rows.
+const ADDED_COLUMNS = {
+  CloudStreams: {
+    program: { type: DataTypes.INTEGER, allowNull: true },
+    backupSources: { type: DataTypes.JSON, allowNull: false, defaultValue: [] }
+  }
+};
+
+async function ensureSchema() {
+  const qi = sequelize.getQueryInterface();
+  for (const [table, columns] of Object.entries(ADDED_COLUMNS)) {
+    let existing;
+    try {
+      existing = await qi.describeTable(table);
+    } catch {
+      continue; // table not created yet - seed.js's sync() creates it complete
+    }
+    for (const [column, spec] of Object.entries(columns)) {
+      if (existing[column]) continue;
+      await qi.addColumn(table, column, spec);
+      console.log(`[Startup] Database: added ${table}.${column}`);
+    }
+  }
+}
+
 async function start() {
   health.start();
+  await ensureSchema();
 
   if (!PLAYOUT_SUPPORTED) {
     await sequelize.authenticate();
