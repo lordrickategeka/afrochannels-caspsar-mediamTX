@@ -13,13 +13,20 @@ async function seed() {
     const password = process.env.SEED_ADMIN_PASS || 'admin';
     const passwordHash = await bcrypt.hash(password, 10);
     await User.create({ username, passwordHash });
-    console.log(`[Seed] Created admin user "${username}" with password "${password}" - log in and this is the only copy of that password, it is not recoverable.`);
+    // Only echo the password when it's the built-in default - one the
+    // operator chose (setup.ps1 prompts for it) must not land in a console log.
+    if (process.env.SEED_ADMIN_PASS) console.log(`[Seed] Created admin user "${username}" with the password you entered.`);
+    else console.log(`[Seed] Created admin user "${username}" with password "${password}" - log in and this is the only copy of that password, it is not recoverable.`);
   } else {
     console.log('[Seed] Users already exist, skipping.');
   }
 
+  // A production install (setup.ps1) sets this: its channels are added by
+  // hand from the dashboard, not from this demo profile.
   const channelCount = await Channel.count();
-  if (channelCount === 0) {
+  if (process.env.SEED_SKIP_SAMPLE_CHANNEL === '1') {
+    console.log('[Seed] Skipping the sample channel.');
+  } else if (channelCount === 0) {
     const channel = await Channel.create({
       name: 'Cinemachi Action',
       casparChannelNumber: 1,
