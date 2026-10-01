@@ -34,6 +34,19 @@ const MEDIAMTX_DIR = path.join(__dirname, '..', 'mediamtx_v1.20.1_windows_amd64'
 // "REMOVE 1-100" both return 202 OK against a real running consumer).
 const STREAM_CONSUMER_INDEX = 100;
 
+// CasparCG (and the bundled MediaMTX build) are Windows binaries. The same
+// dashboard also runs on the Linux ingest VM purely for Cloud Streams and
+// Health - there, everything playout-related is switched off instead of
+// pretending to work (casparcg-connection reports a command as done once
+// it's *sent*, so without this a channel looked "on air" with nothing behind it).
+const PLAYOUT_SUPPORTED = process.platform === 'win32';
+const PLAYOUT_UNAVAILABLE_MESSAGE = `Playout needs CasparCG, which only runs on the Windows playout PC - this ${process.platform} host only does Cloud Streams and Health`;
+
+function requirePlayout(req, res, next) {
+  if (PLAYOUT_SUPPORTED) return next();
+  res.status(501).json({ status: 'error', message: PLAYOUT_UNAVAILABLE_MESSAGE });
+}
+
 if (!process.env.SESSION_SECRET) {
   console.error('[Config] SESSION_SECRET must be set in .env - see .env.example');
   process.exit(1);
@@ -91,7 +104,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 const caspar = new CasparCG({
   host: process.env.CASPAR_HOST || '127.0.0.1',
   port: Number(process.env.CASPAR_PORT) || 5250,
-  autoConnect: true
+  autoConnect: PLAYOUT_SUPPORTED
 });
 
 // Server-side state so the UI can show what's actually happening instead of
@@ -544,7 +557,7 @@ app.get('/api/channels/active', async (req, res) => {
  * consumer) and applies its default presets. Refused if another on-air
  * channel already occupies the same CasparCG channel number.
  */
-app.post('/api/channels/:id/activate', async (req, res) => {
+app.post('/api/channels/:id/activate', requirePlayout, async (req, res) => {
   try {
     const channel = await Channel.findByPk(req.params.id, { include: [Source] });
     if (!channel) return res.status(404).json({ status: 'error', message: 'Channel not found' });
@@ -659,7 +672,7 @@ app.delete('/api/sources/:id', async (req, res) => {
  * POST /api/stream/play
  * Body: { "sourceId": number }
  */
-app.post('/api/stream/play', async (req, res) => {
+app.post('/api/stream/play', requirePlayout, async (req, res) => {
   const { sourceId } = req.body || {};
   if (!sourceId) return res.status(400).json({ status: 'error', message: '"sourceId" is required' });
   try {
@@ -695,7 +708,7 @@ app.get('/api/status', (req, res) => {
       activeGraphics: rt.activeGraphics
     };
   }
-  res.json({ casparConnected: state.casparConnected, lastError: state.lastError, channels });
+  res.json({ playoutSupported: PLAYOUT_SUPPORTED, casparConnected: state.casparConnected, lastError: state.lastError, channels });
 });
 
 /**
@@ -703,7 +716,7 @@ app.get('/api/status', (req, res) => {
  * Body: { "channelId": number, "template": "lower_third" | "logo_bug" | "ticker" | ..., "data": {...} }
  * channelId may be omitted while exactly one channel is on air.
  */
-app.post('/api/graphic/show', async (req, res) => {
+app.post('/api/graphic/show', requirePlayout, async (req, res) => {
   const templateKey = req.body?.template || 'lower_third';
   const template = TEMPLATES[templateKey];
   if (!template) return res.status(400).json({ status: 'error', message: `Unknown template "${templateKey}"` });
@@ -728,7 +741,7 @@ app.post('/api/graphic/show', async (req, res) => {
  * Body: { "channelId": number, "template": "lower_third" | "logo_bug" | "ticker" | ... }
  * channelId may be omitted while exactly one channel is on air.
  */
-app.post('/api/graphic/hide', async (req, res) => {
+app.post('/api/graphic/hide', requirePlayout, async (req, res) => {
   const templateKey = req.body?.template || 'lower_third';
   const template = TEMPLATES[templateKey];
   if (!template) return res.status(400).json({ status: 'error', message: `Unknown template "${templateKey}"` });
@@ -801,7 +814,7 @@ app.post('/api/presets/:id/set-default', async (req, res) => {
  * Shows the preset's saved data on its template's layer, on the channel the
  * preset belongs to (which must be on air).
  */
-app.post('/api/presets/:id/apply', async (req, res) => {
+app.post('/api/presets/:id/apply', requirePlayout, async (req, res) => {
   const preset = await BrandingPreset.findByPk(req.params.id);
   if (!preset) return res.status(404).json({ status: 'error', message: 'Preset not found' });
   const template = TEMPLATES[preset.template];
@@ -825,7 +838,7 @@ app.post('/api/presets/:id/apply', async (req, res) => {
  * POST /api/stream/clear
  * Body: { "channelId": number } - may be omitted while exactly one channel is on air.
  */
-app.post('/api/stream/clear', async (req, res) => {
+app.post('/api/stream/clear', requirePlayout, async (req, res) => {
   try {
     const rt = resolveOnAir(req.body?.channelId);
     // CLEAR stops all producers on the channel (the source, the CG graphics) but
@@ -996,7 +1009,7 @@ procManager.onExit(({ name, code }) => {
  * POST /api/system/restart
  * Body: { "target": "casparcg" | "mediamtx" } - restarts just that one.
  */
-app.post('/api/system/restart', async (req, res) => {
+app.post('/api/system/restart', requirePlayout, async (req, res) => {
   const target = req.body?.target;
   if (target !== 'casparcg' && target !== 'mediamtx') {
     return res.status(400).json({ status: 'error', message: '"target" must be "casparcg" or "mediamtx"' });
@@ -1040,6 +1053,7 @@ app.post('/api/system/restart', async (req, res) => {
  */
 app.get('/api/system/status', (req, res) => {
   res.json({
+    playoutSupported: PLAYOUT_SUPPORTED,
     casparcg: procManager.isRunning('casparcg'),
     mediamtx: procManager.isRunning('mediamtx')
   });
@@ -1194,8 +1208,25 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function listen() {
+  app.listen(PORT, () => {
+    console.log(`\n==================================================`);
+    console.log(` AMCP Controller Engine Running on http://localhost:${PORT}`);
+    console.log(`==================================================\n`);
+  });
+}
+
 async function start() {
   health.start();
+
+  if (!PLAYOUT_SUPPORTED) {
+    await sequelize.authenticate();
+    // Nothing can be on air on this host. Clear any flag left from before
+    // this check existed, or the channel list shows phantom ON AIR channels.
+    const [cleared] = await Channel.update({ isActive: false }, { where: { isActive: true } });
+    console.log(`[Startup] Playout disabled on ${process.platform} - CasparCG/MediaMTX not started; Cloud Streams and Health are available${cleared ? ` (took ${cleared} channel(s) off air)` : ''}`);
+    return listen();
+  }
 
   // Broad, name-based cleanup first: catches any stray casparcg.exe/mediamtx.exe
   // left running from before this dashboard process existed (e.g. a previous
@@ -1246,11 +1277,7 @@ async function start() {
     console.log(`[Startup] Restoring ${onAir.size} on-air channel(s): ${[...onAir.values()].map((rt) => `"${rt.name}" (ch ${rt.casparChannelNumber})`).join(', ')}`);
   }
 
-  app.listen(PORT, () => {
-    console.log(`\n==================================================`);
-    console.log(` AMCP Controller Engine Running on http://localhost:${PORT}`);
-    console.log(`==================================================\n`);
-  });
+  listen();
 }
 
 // Clean up managed children on a graceful dashboard shutdown (Ctrl+C, or being

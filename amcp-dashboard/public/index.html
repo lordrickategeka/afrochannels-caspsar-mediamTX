@@ -46,11 +46,14 @@
         <!-- Which channel every control on this page acts on. Several
              channels can be on air at once; this only picks the one being
              operated, it never takes anything on or off air by itself. -->
-        <div class="flex flex-wrap items-center gap-2 mt-1">
+        <div id="channel-picker" class="flex flex-wrap items-center gap-2 mt-1">
           <span class="text-slate-400 text-sm">Controlling:</span>
           <select id="channel-select" onchange="selectChannel(Number(this.value))" class="bg-slate-800 border border-slate-700 rounded-lg px-2 py-1 text-sm text-slate-100 focus:outline-none focus:border-sky-500"></select>
           <span id="channel-air-badge"></span>
         </div>
+        <!-- Shown when this dashboard runs on a host without CasparCG (the
+             Linux ingest VM): see applyPlayoutMode(). -->
+        <p id="playout-off-banner" class="hidden text-sm text-slate-400 mt-1">Cloud Streams host - channels and branding run on the Windows playout PC.</p>
       </div>
       <button onclick="logout(this)" class="text-slate-400 hover:text-slate-200 text-sm border border-slate-700 rounded-lg px-3 py-1.5 transition">Log Out</button>
     </header>
@@ -574,15 +577,44 @@
     // The video monitor and status bar live outside these tabs (sticky right
     // column in the HTML) so they stay visible no matter which tab is open.
     const MAIN_TABS = ['channels', 'graphics', 'cloud', 'health', 'system'];
+    const PLAYOUT_TABS = ['channels', 'graphics'];
+    // Set from /api/status. False when the dashboard runs on a host without
+    // CasparCG (the Linux ingest VM) - the playout half is hidden there.
+    let playoutSupported = true;
 
     function setMainTab(name) {
+      if (!playoutSupported && PLAYOUT_TABS.includes(name)) name = 'cloud';
       for (const tab of MAIN_TABS) {
+        const hiddenTab = !playoutSupported && PLAYOUT_TABS.includes(tab);
         document.getElementById(`tab-panel-${tab}`).className = tab === name ? 'flex flex-col gap-6' : 'hidden';
         document.getElementById(`tab-btn-${tab}`).className =
-          `px-4 py-2 rounded-lg text-sm font-medium transition whitespace-nowrap ${tab === name ? 'bg-sky-600 text-white' : 'bg-slate-800 text-slate-400 hover:text-slate-200'}`;
+          `px-4 py-2 rounded-lg text-sm font-medium transition whitespace-nowrap ${hiddenTab ? 'hidden' : ''} ${tab === name ? 'bg-sky-600 text-white' : 'bg-slate-800 text-slate-400 hover:text-slate-200'}`;
       }
       try { localStorage.setItem('mainTab', name); } catch { /* private browsing etc - just won't persist */ }
       if (name === 'health' && typeof renderHealth === 'function' && healthReport) renderHealth();
+    }
+
+    // Hides everything that needs CasparCG: the Channels/Graphics tabs, the
+    // channel picker, the playout status items, the output monitor and HLS
+    // link, and the CasparCG/MediaMTX restart rows. Called once, the first
+    // time /api/status reports playoutSupported: false.
+    function applyPlayoutMode(supported) {
+      playoutSupported = supported;
+      const toggle = (node) => node?.classList.toggle('hidden', !supported);
+      toggle(document.getElementById('channel-picker'));
+      document.getElementById('playout-off-banner').classList.toggle('hidden', supported);
+      for (const id of ['dot-caspar', 'dot-stream', 'status-source', 'status-onair-count']) toggle(document.getElementById(id)?.parentElement);
+      toggle(document.getElementById('preview')?.closest('.shadow-lg'));
+      toggle(document.getElementById('hls-link')?.closest('.shadow-lg'));
+      const systemCard = document.getElementById('dot-proc-casparcg')?.closest('.shadow-lg');
+      toggle(systemCard?.querySelector('p'));
+      for (const id of ['dot-proc-casparcg', 'dot-proc-mediamtx']) toggle(document.getElementById(id)?.closest('.justify-between'));
+      if (!supported) {
+        stopPreview();
+        previewUrl = null;
+      }
+      const current = MAIN_TABS.find((t) => !document.getElementById(`tab-panel-${t}`).classList.contains('hidden'));
+      setMainTab(current || 'cloud');
     }
 
     function log(msg, level = 'info') {
@@ -857,7 +889,7 @@
       renderSourceButtons();
       renderPresets();
 
-      const url = ch ? deriveHlsUrl(ch.rtmpTarget) : null;
+      const url = ch && playoutSupported ? deriveHlsUrl(ch.rtmpTarget) : null;
       document.getElementById('hls-link').innerText = url || 'No channel selected';
       // Only restart the player when the URL actually changes - this runs on
       // every reload of the channel list, and restarting would blank the
@@ -1332,6 +1364,7 @@
     async function pollStatus() {
       try {
         const s = await api('/api/status');
+        if (s.playoutSupported === false && playoutSupported) applyPlayoutMode(false);
         const onAirIds = Object.keys(s.channels || {}).map(Number);
         document.getElementById('dot-caspar').className = `w-2.5 h-2.5 rounded-full ${s.casparConnected ? 'bg-emerald-500' : 'bg-red-500'}`;
         document.getElementById('status-onair-count').textContent = String(onAirIds.length);

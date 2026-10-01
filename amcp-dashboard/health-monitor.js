@@ -143,7 +143,12 @@ function startGpuReader() {
     return;
   }
   gpu.proc = proc;
-  proc.on('error', () => { gpu.status = 'unavailable'; gpu.proc = null; });
+  proc.on('error', (err) => {
+    gpu.status = 'unavailable';
+    gpu.proc = null;
+    // No NVIDIA driver on this machine at all - nothing to retry.
+    if (err.code === 'ENOENT') gpu.missing = true;
+  });
   readline.createInterface({ input: proc.stdout }).on('line', (line) => {
     const parts = line.split(',');
     if (parts.length !== fields.length) return;
@@ -166,7 +171,7 @@ function startGpuReader() {
   });
   proc.on('exit', () => {
     gpu.proc = null;
-    if (!started) return;
+    if (!started || gpu.missing) return;
     if (!gotData && gpu.queryIndex < GPU_QUERIES.length - 1) {
       gpu.queryIndex += 1; // this driver rejected a field - retry with fewer
       startGpuReader();
